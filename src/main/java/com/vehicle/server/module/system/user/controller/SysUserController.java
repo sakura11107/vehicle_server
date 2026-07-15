@@ -1,6 +1,8 @@
 package com.vehicle.server.module.system.user.controller;
 
 import com.vehicle.server.common.api.ApiResponse;
+import com.vehicle.server.common.dto.PageRequest;
+import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.module.system.user.dto.UserCreateRequest;
 import com.vehicle.server.module.system.user.dto.UserResponse;
 import com.vehicle.server.module.system.user.dto.UserUpdateRequest;
@@ -20,8 +22,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.List;
-
 @RestController
 @RequestMapping("/api/users")
 @RequiredArgsConstructor
@@ -38,9 +38,9 @@ public class SysUserController {
     }
 
     @GetMapping
-    @Operation(summary = "查询用户列表", description = "仅返回未逻辑删除的用户")
-    public ApiResponse<List<UserResponse>> list() {
-        return ApiResponse.success(userService.list());
+    @Operation(summary = "查询用户列表", description = "仅返回未逻辑删除的用户，支持分页")
+    public ApiResponse<PageResponse<UserResponse>> list(@Valid PageRequest pageRequest) {
+        return ApiResponse.success(userService.list(pageRequest));
     }
 
     @GetMapping("/{id}")

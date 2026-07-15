@@ -1,8 +1,13 @@
 package com.vehicle.server.module.system.user.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.vehicle.server.common.dto.PageRequest;
+import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.common.exception.BusinessException;
 import com.vehicle.server.common.exception.ErrorCode;
+import com.vehicle.server.common.id.SnowflakeIdGenerator;
 import com.vehicle.server.module.system.user.dto.UserCreateRequest;
 import com.vehicle.server.module.system.user.dto.UserResponse;
 import com.vehicle.server.module.system.user.dto.UserUpdateRequest;
@@ -14,7 +19,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -39,10 +43,12 @@ public class SysUserService {
     }
 
     @Transactional(readOnly = true)
-    public List<UserResponse> list() {
-        return userMapper.selectList(new LambdaQueryWrapper<SysUser>()
-                        .eq(SysUser::getDeleted, NOT_DELETED))
-                .stream().map(UserResponse::from).toList();
+    public PageResponse<UserResponse> list(PageRequest pageRequest) {
+        IPage<SysUser> page = userMapper.selectPage(
+                new Page<>(pageRequest.page(), pageRequest.size()),
+                new LambdaQueryWrapper<SysUser>().eq(SysUser::getDeleted, NOT_DELETED)
+        );
+        return PageResponse.of(page, page.getRecords().stream().map(UserResponse::from).toList());
     }
 
     @Transactional(readOnly = true)

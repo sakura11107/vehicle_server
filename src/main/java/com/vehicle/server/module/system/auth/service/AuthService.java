@@ -8,7 +8,7 @@ import com.vehicle.server.module.system.auth.dto.RegisterRequest;
 import com.vehicle.server.module.system.user.dto.UserResponse;
 import com.vehicle.server.module.system.user.entity.SysUser;
 import com.vehicle.server.module.system.user.mapper.SysUserMapper;
-import com.vehicle.server.module.system.user.service.SnowflakeIdGenerator;
+import com.vehicle.server.common.id.SnowflakeIdGenerator;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;

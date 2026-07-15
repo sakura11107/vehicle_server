@@ -1,7 +1,10 @@
-package com.vehicle.server.module.system.user.service;
+package com.vehicle.server.common.id;
 
 import org.springframework.stereotype.Component;
 
+/**
+ * 简易雪花算法 ID 生成器。
+ */
 @Component
 public class SnowflakeIdGenerator {
 
