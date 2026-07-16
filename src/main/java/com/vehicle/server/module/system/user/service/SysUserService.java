@@ -9,12 +9,13 @@ import com.vehicle.server.common.exception.BusinessException;
 import com.vehicle.server.common.exception.ErrorCode;
 import com.vehicle.server.common.id.SnowflakeIdGenerator;
 import com.vehicle.server.module.system.user.dto.UserCreateRequest;
+import com.vehicle.server.module.system.user.dto.UserListRequest;
 import com.vehicle.server.module.system.user.dto.UserResponse;
 import com.vehicle.server.module.system.user.dto.UserUpdateRequest;
 import com.vehicle.server.module.system.user.entity.SysUser;
 import com.vehicle.server.module.system.user.mapper.SysUserMapper;
 import lombok.RequiredArgsConstructor;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,7 +28,7 @@ public class SysUserService {
     private static final Integer NOT_DELETED = 0;
     private final SysUserMapper userMapper;
     private final SnowflakeIdGenerator idGenerator;
-    private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+    private final PasswordEncoder passwordEncoder;
 
     @Transactional
     public UserResponse create(UserCreateRequest request) {
@@ -43,10 +44,16 @@ public class SysUserService {
     }
 
     @Transactional(readOnly = true)
-    public PageResponse<UserResponse> list(PageRequest pageRequest) {
+    public PageResponse<UserResponse> list(PageRequest pageRequest, UserListRequest query) {
+        LambdaQueryWrapper<SysUser> wrapper = new LambdaQueryWrapper<SysUser>()
+                .eq(SysUser::getDeleted, NOT_DELETED)
+                .like(query.username() != null && !query.username().isBlank(),
+                        SysUser::getUsername, query.username())
+                .eq(query.status() != null, SysUser::getStatus, query.status())
+                .orderByDesc(SysUser::getCreatedTime);
         IPage<SysUser> page = userMapper.selectPage(
                 new Page<>(pageRequest.page(), pageRequest.size()),
-                new LambdaQueryWrapper<SysUser>().eq(SysUser::getDeleted, NOT_DELETED)
+                wrapper
         );
         return PageResponse.of(page, page.getRecords().stream().map(UserResponse::from).toList());
     }

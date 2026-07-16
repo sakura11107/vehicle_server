@@ -1,5 +1,7 @@
 package com.vehicle.server.module.vehicle.dto;
 
+import com.vehicle.server.module.vehicle.enums.VehicleStatus;
+
 /**
  * 车辆列表的查询条件。
  */
@@ -8,5 +10,5 @@ public record VehicleListRequest(
         String brand,
         String model,
         String color,
-        Integer status) {
+        VehicleStatus status) {
 }

@@ -13,15 +13,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
-import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.ResponseStatus;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 /**
  * 车辆基础信息的 HTTP 接口。
@@ -37,8 +29,8 @@ public class VehicleController {
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     @Operation(summary = "新增车辆")
-    public VehicleResponse create(@Valid @RequestBody VehicleCreateRequest request) {
-        return vehicleService.create(request);
+    public ApiResponse<VehicleResponse> create(@Valid @RequestBody VehicleCreateRequest request) {
+        return ApiResponse.success(vehicleService.create(request));
     }
 
     @GetMapping
@@ -49,20 +41,21 @@ public class VehicleController {
 
     @GetMapping("/{id}")
     @Operation(summary = "按 ID 查询车辆")
-    public VehicleResponse getById(@PathVariable Long id) {
-        return vehicleService.getById(id);
+    public ApiResponse<VehicleResponse> getById(@PathVariable Long id) {
+        return ApiResponse.success(vehicleService.getById(id));
     }
 
     @PutMapping("/{id}")
     @Operation(summary = "修改车辆")
-    public VehicleResponse update(@PathVariable Long id, @Valid @RequestBody VehicleUpdateRequest request) {
-        return vehicleService.update(id, request);
+    public ApiResponse<VehicleResponse> update(@PathVariable Long id, @Valid @RequestBody VehicleUpdateRequest request) {
+        return ApiResponse.success(vehicleService.update(id, request));
     }
 
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     @Operation(summary = "删除车辆", description = "执行逻辑删除，不会物理删除数据库记录")
-    public void delete(@PathVariable Long id) {
+    public ApiResponse<Void> delete(@PathVariable Long id) {
         vehicleService.delete(id);
+        return ApiResponse.success(null);
     }
 }

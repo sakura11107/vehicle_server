@@ -1,5 +1,6 @@
 package com.vehicle.server.module.vehicle.dto;
 
+import com.vehicle.server.module.vehicle.enums.VehicleStatus;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -17,6 +18,6 @@ public record VehicleCreateRequest(
         LocalDate purchaseDate,
         LocalDate rentStartDate,
         LocalDate rentEndDate,
-        @NotNull Integer status,
+        @NotNull VehicleStatus status,
         @Size(max = 500) String remark) {
 }

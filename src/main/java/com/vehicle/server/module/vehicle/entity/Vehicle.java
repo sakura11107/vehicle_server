@@ -8,6 +8,8 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+import com.vehicle.server.module.vehicle.enums.VehicleStatus;
+
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
@@ -38,7 +40,7 @@ public class Vehicle {
     @TableField("rent_end_date")
     private LocalDate rentEndDate;
 
-    private Integer status = 1;
+    private VehicleStatus status = VehicleStatus.IDLE;
 
     private String remark;
 

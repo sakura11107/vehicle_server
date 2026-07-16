@@ -1,6 +1,7 @@
 package com.vehicle.server.module.vehicle.dto;
 
 import com.vehicle.server.module.vehicle.entity.Vehicle;
+import com.vehicle.server.module.vehicle.enums.VehicleStatus;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -17,7 +18,7 @@ public record VehicleResponse(
         LocalDate purchaseDate,
         LocalDate rentStartDate,
         LocalDate rentEndDate,
-        Integer status,
+        VehicleStatus status,
         String remark,
         LocalDateTime createdTime,
         LocalDateTime updatedTime) {
