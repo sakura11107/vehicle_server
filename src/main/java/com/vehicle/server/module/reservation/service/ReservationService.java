@@ -12,6 +12,8 @@ import com.vehicle.server.module.reservation.dto.*;
 import com.vehicle.server.module.reservation.entity.VehicleReservation;
 import com.vehicle.server.module.reservation.enums.ReservationStatus;
 import com.vehicle.server.module.reservation.mapper.VehicleReservationMapper;
+import com.vehicle.server.module.system.user.entity.SysUser;
+import com.vehicle.server.module.system.user.mapper.SysUserMapper;
 import com.vehicle.server.module.vehicle.entity.Vehicle;
 import com.vehicle.server.module.vehicle.enums.VehicleStatus;
 import com.vehicle.server.module.vehicle.mapper.VehicleMapper;
@@ -20,6 +22,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -28,6 +33,7 @@ public class ReservationService {
     private static final Integer NOT_DELETED = 0;
     private final VehicleReservationMapper reservationMapper;
     private final VehicleMapper vehicleMapper;
+    private final SysUserMapper userMapper;
     private final SnowflakeIdGenerator idGenerator;
 
     @Transactional
@@ -49,7 +55,8 @@ public class ReservationService {
         reservation.setUpdatedTime(now);
         reservationMapper.insert(reservation);
 
-        return ReservationResponse.from(reservation);
+        SysUser user = userMapper.selectById(currentUserId);
+        return ReservationResponse.from(reservation, vehicle, user, null);
     }
 
     @Transactional(readOnly = true)
@@ -64,12 +71,38 @@ public class ReservationService {
                 new Page<>(pageRequest.page(), pageRequest.size()),
                 wrapper
         );
-        return PageResponse.of(page, page.getRecords().stream().map(ReservationResponse::from).toList());
+
+        Set<Long> vehicleIds = page.getRecords().stream()
+                .map(VehicleReservation::getVehicleId).collect(Collectors.toSet());
+        Set<Long> userIds = page.getRecords().stream()
+                .map(VehicleReservation::getUserId).collect(Collectors.toSet());
+        page.getRecords().forEach(r -> {
+            if (r.getAuditUserId() != null) userIds.add(r.getAuditUserId());
+        });
+
+        Map<Long, Vehicle> vehicleMap = vehicleIds.isEmpty() ? Map.of()
+                : vehicleMapper.selectBatchIds(vehicleIds).stream()
+                .collect(Collectors.toMap(Vehicle::getId, v -> v));
+        Map<Long, SysUser> userMap = userIds.isEmpty() ? Map.of()
+                : userMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(SysUser::getId, u -> u));
+
+        return PageResponse.of(page, page.getRecords().stream()
+                .map(r -> ReservationResponse.from(r,
+                        vehicleMap.get(r.getVehicleId()),
+                        userMap.get(r.getUserId()),
+                        userMap.get(r.getAuditUserId())))
+                .toList());
     }
 
     @Transactional(readOnly = true)
     public ReservationResponse getById(Long id) {
-        return ReservationResponse.from(findReservation(id));
+        VehicleReservation reservation = findReservation(id);
+        Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
+        SysUser user = userMapper.selectById(reservation.getUserId());
+        SysUser auditUser = reservation.getAuditUserId() != null
+                ? userMapper.selectById(reservation.getAuditUserId()) : null;
+        return ReservationResponse.from(reservation, vehicle, user, auditUser);
     }
 
     @Transactional
@@ -90,7 +123,9 @@ public class ReservationService {
         reservation.setUpdatedTime(LocalDateTime.now());
         reservationMapper.updateById(reservation);
 
-        return ReservationResponse.from(reservation);
+        Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
+        SysUser user = userMapper.selectById(reservation.getUserId());
+        return ReservationResponse.from(reservation, vehicle, user, null);
     }
 
     @Transactional
@@ -131,7 +166,10 @@ public class ReservationService {
             }
         }
 
-        return ReservationResponse.from(reservation);
+        Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
+        SysUser user = userMapper.selectById(reservation.getUserId());
+        SysUser auditUser = userMapper.selectById(auditorId);
+        return ReservationResponse.from(reservation, vehicle, user, auditUser);
     }
 
     @Transactional
@@ -160,7 +198,8 @@ public class ReservationService {
             vehicleMapper.updateById(vehicle);
         }
 
-        return ReservationResponse.from(reservation);
+        SysUser user = userMapper.selectById(reservation.getUserId());
+        return ReservationResponse.from(reservation, vehicle, user, null);
     }
 
     private Vehicle findAvailableVehicle(Long vehicleId) {

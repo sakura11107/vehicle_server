@@ -2,6 +2,8 @@ package com.vehicle.server.module.reservation.dto;
 
 import com.vehicle.server.module.reservation.entity.VehicleReservation;
 import com.vehicle.server.module.reservation.enums.ReservationStatus;
+import com.vehicle.server.module.system.user.entity.SysUser;
+import com.vehicle.server.module.vehicle.entity.Vehicle;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -31,9 +33,14 @@ public record ReservationResponse(
         BigDecimal fuelFee,
         BigDecimal otherFee,
         LocalDateTime createdTime,
-        LocalDateTime updatedTime) {
+        LocalDateTime updatedTime,
+        String vehiclePlateNumber,
+        String vehicleBrand,
+        String vehicleModel,
+        String userName,
+        String auditUserName) {
 
-    public static ReservationResponse from(VehicleReservation r) {
+    public static ReservationResponse from(VehicleReservation r, Vehicle vehicle, SysUser user, SysUser auditUser) {
         return new ReservationResponse(
                 r.getId(),
                 r.getVehicleId(),
@@ -56,7 +63,12 @@ public record ReservationResponse(
                 r.getFuelFee(),
                 r.getOtherFee(),
                 r.getCreatedTime(),
-                r.getUpdatedTime()
+                r.getUpdatedTime(),
+                vehicle != null ? vehicle.getPlateNumber() : null,
+                vehicle != null ? vehicle.getBrand() : null,
+                vehicle != null ? vehicle.getModel() : null,
+                user != null ? user.getUsername() : null,
+                auditUser != null ? auditUser.getUsername() : null
         );
     }
 }
