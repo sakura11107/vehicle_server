@@ -18,14 +18,18 @@ import com.vehicle.server.module.vehicle.entity.Vehicle;
 import com.vehicle.server.module.vehicle.enums.VehicleStatus;
 import com.vehicle.server.module.vehicle.mapper.VehicleMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class ReservationService {
@@ -35,6 +39,7 @@ public class ReservationService {
     private final VehicleMapper vehicleMapper;
     private final SysUserMapper userMapper;
     private final SnowflakeIdGenerator idGenerator;
+    private final RabbitTemplate rabbitTemplate;
 
     @Transactional
     public ReservationResponse create(Long currentUserId, ReservationCreateRequest request) {
@@ -56,7 +61,60 @@ public class ReservationService {
         reservationMapper.insert(reservation);
 
         SysUser user = userMapper.selectById(currentUserId);
+
+        notifyAdmins(currentUserId, reservation, vehicle);
+
         return ReservationResponse.from(reservation, vehicle, user, null);
+    }
+
+    private void notifyAdmins(Long applicantId, VehicleReservation reservation, Vehicle vehicle) {
+        List<SysUser> admins = userMapper.selectList(new LambdaQueryWrapper<SysUser>()
+                .in(SysUser::getRole, 1, 2)
+                .eq(SysUser::getDeleted, 0));
+        if (admins.isEmpty()) {
+            log.warn("没有管理员用户，无法发送用车申请通知");
+            return;
+        }
+
+        String content = String.format("用户 %s 申请使用车辆 %s（%s），用车时间：%s ~ %s，请及时审核。",
+                userMapper.selectById(applicantId).getUsername(),
+                vehicle.getPlateNumber(),
+                vehicle.getBrand() + " " + vehicle.getModel(),
+                reservation.getStartTime(),
+                reservation.getEndTime());
+
+        for (SysUser admin : admins) {
+            try {
+                rabbitTemplate.convertAndSend("message.exchange", "message.send", Map.of(
+                        "senderId", applicantId.toString(),
+                        "receiverId", admin.getId().toString(),
+                        "content", content
+                ));
+                log.info("用车申请通知已发送给管理员 {}: {}", admin.getId(), admin.getUsername());
+            } catch (Exception e) {
+                log.error("发送用车申请通知给管理员 {} 失败: {}", admin.getId(), e.getMessage(), e);
+            }
+        }
+    }
+
+    private void notifyApplicant(Long auditorId, VehicleReservation reservation, Vehicle vehicle, AuditRequest request) {
+        String statusText = request.approved() ? "已通过" : "已拒绝";
+        String content = String.format("您的用车申请（%s %s）%s，审核备注：%s",
+                vehicle.getPlateNumber(),
+                vehicle.getBrand() + " " + vehicle.getModel(),
+                statusText,
+                request.remark() != null ? request.remark() : "无");
+
+        try {
+            rabbitTemplate.convertAndSend("message.exchange", "message.send", Map.of(
+                    "senderId", auditorId.toString(),
+                    "receiverId", reservation.getUserId().toString(),
+                    "content", content
+            ));
+            log.info("审核结果通知已发送给用户 {}: {}", reservation.getUserId(), statusText);
+        } catch (Exception e) {
+            log.error("发送审核结果通知给用户 {} 失败: {}", reservation.getUserId(), e.getMessage(), e);
+        }
     }
 
     @Transactional(readOnly = true)
@@ -169,6 +227,9 @@ public class ReservationService {
         Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
         SysUser user = userMapper.selectById(reservation.getUserId());
         SysUser auditUser = userMapper.selectById(auditorId);
+
+        notifyApplicant(auditorId, reservation, vehicle, request);
+
         return ReservationResponse.from(reservation, vehicle, user, auditUser);
     }
 
