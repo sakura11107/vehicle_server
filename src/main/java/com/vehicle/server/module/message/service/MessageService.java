@@ -1,8 +1,6 @@
 package com.vehicle.server.module.message.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.metadata.IPage;
-import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.vehicle.server.common.dto.PageRequest;
 import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.common.exception.BusinessException;
@@ -68,26 +66,33 @@ public class MessageService {
         LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
                 .eq(Message::getDeleted, NOT_DELETED)
                 .and(w -> w
-                        .and(inner -> inner
-                                .eq(Message::getSenderId, currentUserId)
-                                .eq(Message::getReceiverId, otherUserId))
-                        .or(inner -> inner
-                                .eq(Message::getSenderId, otherUserId)
-                                .eq(Message::getReceiverId, currentUserId)))
-                .orderByAsc(Message::getCreatedTime);
+                        .eq(Message::getSenderId, currentUserId)
+                        .eq(Message::getReceiverId, otherUserId)
+                        .or()
+                        .eq(Message::getSenderId, otherUserId)
+                        .eq(Message::getReceiverId, currentUserId))
+                .orderByDesc(Message::getCreatedTime);
 
-        IPage<Message> page = messageMapper.selectPage(
-                new Page<>(pageRequest.page(), pageRequest.size()),
-                wrapper
-        );
+        List<Message> allMessages = messageMapper.selectList(wrapper);
+
+        int total = allMessages.size();
+        int page = pageRequest.page();
+        int size = pageRequest.size();
+        int offset = (page - 1) * size;
+        List<Message> pagedMessages = (offset < total)
+                ? allMessages.subList(offset, Math.min(offset + size, total))
+                : List.of();
 
         Set<Long> userIds = Set.of(currentUserId, otherUserId);
         Map<Long, String> userMap = userMapper.selectBatchIds(userIds).stream()
                 .collect(Collectors.toMap(SysUser::getId, SysUser::getUsername));
 
-        return PageResponse.of(page, page.getRecords().stream()
+        int totalPages = (total + size - 1) / size;
+        List<MessageResponse> records = pagedMessages.stream()
                 .map(m -> MessageResponse.from(m, userMap.get(m.getSenderId()), userMap.get(m.getReceiverId())))
-                .toList());
+                .toList();
+
+        return new PageResponse<>(records, total, page, size, totalPages);
     }
 
     @Transactional(readOnly = true)
@@ -112,14 +117,24 @@ public class MessageService {
         }
 
         Set<Long> otherUserIds = lastMessageMap.keySet();
+
         Map<Long, String> userMap = userMapper.selectBatchIds(otherUserIds).stream()
                 .collect(Collectors.toMap(SysUser::getId, SysUser::getUsername));
+
+        LambdaQueryWrapper<Message> unreadWrapper = new LambdaQueryWrapper<Message>()
+                .eq(Message::getDeleted, NOT_DELETED)
+                .eq(Message::getReceiverId, currentUserId)
+                .eq(Message::getIsRead, 0)
+                .in(Message::getSenderId, otherUserIds);
+        List<Message> unreadMessages = messageMapper.selectList(unreadWrapper);
+        Map<Long, Long> unreadCountMap = unreadMessages.stream()
+                .collect(Collectors.groupingBy(Message::getSenderId, Collectors.counting()));
 
         return lastMessageMap.entrySet().stream()
                 .map(entry -> {
                     Long otherUserId = entry.getKey();
                     Message lastMsg = entry.getValue();
-                    long unreadCount = 0;
+                    long unreadCount = unreadCountMap.getOrDefault(otherUserId, 0L);
                     return new ConversationResponse(
                             otherUserId,
                             userMap.getOrDefault(otherUserId, "未知用户"),
@@ -133,6 +148,13 @@ public class MessageService {
 
     @Transactional
     public void markAsRead(Long currentUserId, Long otherUserId) {
+        LambdaQueryWrapper<Message> countWrapper = new LambdaQueryWrapper<Message>()
+                .eq(Message::getDeleted, NOT_DELETED)
+                .eq(Message::getSenderId, otherUserId)
+                .eq(Message::getReceiverId, currentUserId)
+                .eq(Message::getIsRead, 0);
+        long count = messageMapper.selectCount(countWrapper);
+
         LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
                 .eq(Message::getDeleted, NOT_DELETED)
                 .eq(Message::getSenderId, otherUserId)
@@ -144,11 +166,22 @@ public class MessageService {
         update.setUpdatedTime(LocalDateTime.now());
         messageMapper.update(update, wrapper);
 
-        redisTemplate.delete(UNREAD_PREFIX + currentUserId);
+        if (count > 0) {
+            Long remaining = redisTemplate.opsForValue().decrement(UNREAD_PREFIX + currentUserId, count);
+            if (remaining != null && remaining < 0) {
+                redisTemplate.delete(UNREAD_PREFIX + currentUserId);
+            }
+        }
     }
 
     @Transactional
     public void markAllAsRead(Long currentUserId) {
+        LambdaQueryWrapper<Message> countWrapper = new LambdaQueryWrapper<Message>()
+                .eq(Message::getDeleted, NOT_DELETED)
+                .eq(Message::getReceiverId, currentUserId)
+                .eq(Message::getIsRead, 0);
+        long count = messageMapper.selectCount(countWrapper);
+
         LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
                 .eq(Message::getDeleted, NOT_DELETED)
                 .eq(Message::getReceiverId, currentUserId)

@@ -15,8 +15,4 @@ public record PageRequest(
         if (size < 1) size = 10;
         if (size > 100) size = 100;
     }
-
-    public PageRequest() {
-        this(1, 10);
-    }
 }
