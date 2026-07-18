@@ -13,6 +13,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 /**
@@ -28,7 +29,8 @@ public class VehicleController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    @Operation(summary = "新增车辆")
+    @PreAuthorize("hasRole('MANAGER')")
+    @Operation(summary = "新增车辆", description = "需车辆管理员及以上角色")
     public ApiResponse<VehicleResponse> create(@Valid @RequestBody VehicleCreateRequest request) {
         return ApiResponse.success(vehicleService.create(request));
     }
@@ -46,14 +48,16 @@ public class VehicleController {
     }
 
     @PutMapping("/{id}")
-    @Operation(summary = "修改车辆")
+    @PreAuthorize("hasRole('MANAGER')")
+    @Operation(summary = "修改车辆", description = "需车辆管理员及以上角色")
     public ApiResponse<VehicleResponse> update(@PathVariable Long id, @Valid @RequestBody VehicleUpdateRequest request) {
         return ApiResponse.success(vehicleService.update(id, request));
     }
 
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    @Operation(summary = "删除车辆", description = "执行逻辑删除，不会物理删除数据库记录")
+    @PreAuthorize("hasRole('MANAGER')")
+    @Operation(summary = "删除车辆", description = "执行逻辑删除，不会物理删除数据库记录。需车辆管理员及以上角色")
     public ApiResponse<Void> delete(@PathVariable Long id) {
         vehicleService.delete(id);
         return ApiResponse.success(null);

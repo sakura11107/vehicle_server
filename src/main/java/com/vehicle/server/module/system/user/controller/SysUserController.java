@@ -13,6 +13,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -26,7 +27,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/users")
 @RequiredArgsConstructor
-@Tag(name = "用户管理", description = "系统用户的新增、查询、修改和逻辑删除")
+@PreAuthorize("hasRole('ADMIN')")
+@Tag(name = "用户管理", description = "系统用户的新增、查询、修改和逻辑删除（仅系统管理员）")
 public class SysUserController {
 
     private final SysUserService userService;

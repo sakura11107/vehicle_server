@@ -10,7 +10,10 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/reservations")
@@ -28,11 +31,19 @@ public class ReservationController {
     }
 
     @GetMapping
-    @Operation(summary = "查询预约列表", description = "支持按车辆ID、用户ID、状态筛选，支持分页")
+    @Operation(summary = "查询预约列表", description = "支持按车辆ID、用户ID、状态筛选，支持分页。普通用户强制仅看本人预约。")
     public ApiResponse<PageResponse<ReservationResponse>> list(
             @Valid PageRequest pageRequest,
             ReservationListRequest query) {
-        return ApiResponse.success(reservationService.list(pageRequest, query));
+        Long currentUserId = SecurityUtils.getCurrentUserId();
+        return ApiResponse.success(reservationService.list(currentUserId, pageRequest, query));
+    }
+
+    @GetMapping("/schedule")
+    @Operation(summary = "查询车辆占用视图", description = "返回申请中/已通过/使用中的预约，供甘特图及预约表单冲突校验使用")
+    public ApiResponse<List<VehicleScheduleItem>> schedule(
+            @RequestParam(required = false) Long vehicleId) {
+        return ApiResponse.success(reservationService.schedule(vehicleId));
     }
 
     @GetMapping("/{id}")
@@ -59,7 +70,8 @@ public class ReservationController {
     }
 
     @PutMapping("/{id}/audit")
-    @Operation(summary = "审核预约", description = "审核通过或拒绝")
+    @PreAuthorize("hasRole('MANAGER')")
+    @Operation(summary = "审核预约", description = "审核通过或拒绝。需车辆管理员及以上角色，且不能审核自己的申请")
     public ApiResponse<ReservationResponse> audit(
             @PathVariable Long id,
             @Valid @RequestBody AuditRequest request) {
@@ -68,10 +80,11 @@ public class ReservationController {
     }
 
     @PutMapping("/{id}/return")
-    @Operation(summary = "还车登记", description = "登记还车信息并更新车辆状态")
+    @Operation(summary = "还车登记", description = "登记还车信息并更新车辆状态。申请人本人或车辆管理员及以上角色可操作")
     public ApiResponse<ReservationResponse> returnVehicle(
             @PathVariable Long id,
             @Valid @RequestBody ReturnRequest request) {
-        return ApiResponse.success(reservationService.returnVehicle(id, request));
+        Long currentUserId = SecurityUtils.getCurrentUserId();
+        return ApiResponse.success(reservationService.returnVehicle(id, currentUserId, request));
     }
 }

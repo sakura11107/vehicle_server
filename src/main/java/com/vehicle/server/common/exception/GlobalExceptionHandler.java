@@ -3,6 +3,7 @@ package com.vehicle.server.common.exception;
 import com.vehicle.server.common.api.ApiResponse;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -27,6 +28,16 @@ public class GlobalExceptionHandler {
                 .map(error -> new com.vehicle.server.common.api.FieldError(error.getField(), toValidationCode(error)))
                 .toList();
         return ResponseEntity.badRequest().body(ApiResponse.validationFailure(errors));
+    }
+
+    /**
+     * 方法级安全（@PreAuthorize）拒绝时抛出的 AccessDeniedException（含其子类
+     * AuthorizationDeniedException）在 DispatcherServlet 内抛出，过滤器链无法捕获，
+     * 需在此统一转为 403。
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiResponse<Void>> handleAccessDeniedException(AccessDeniedException exception) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ApiResponse.failure(ErrorCode.FORBIDDEN));
     }
 
     @ExceptionHandler(Exception.class)

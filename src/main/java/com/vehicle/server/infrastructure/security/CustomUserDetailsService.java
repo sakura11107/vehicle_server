@@ -2,6 +2,7 @@ package com.vehicle.server.infrastructure.security;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.vehicle.server.module.system.user.entity.SysUser;
+import com.vehicle.server.module.system.user.enums.UserRole;
 import com.vehicle.server.module.system.user.mapper.SysUserMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -32,11 +33,7 @@ public class CustomUserDetailsService implements UserDetailsService {
             throw new UsernameNotFoundException("用户已禁用: " + username);
         }
 
-        String role = switch (user.getRole()) {
-            case 2 -> "ROLE_ADMIN";
-            case 1 -> "ROLE_MANAGER";
-            default -> "ROLE_USER";
-        };
+        String role = UserRole.fromCode(user.getRole()).getAuthority();
 
         return new User(
                 user.getUsername(),

@@ -8,11 +8,13 @@ import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.common.exception.BusinessException;
 import com.vehicle.server.common.exception.ErrorCode;
 import com.vehicle.server.common.id.SnowflakeIdGenerator;
+import com.vehicle.server.infrastructure.security.SecurityUtils;
 import com.vehicle.server.module.reservation.dto.*;
 import com.vehicle.server.module.reservation.entity.VehicleReservation;
 import com.vehicle.server.module.reservation.enums.ReservationStatus;
 import com.vehicle.server.module.reservation.mapper.VehicleReservationMapper;
 import com.vehicle.server.module.system.user.entity.SysUser;
+import com.vehicle.server.module.system.user.enums.UserRole;
 import com.vehicle.server.module.system.user.mapper.SysUserMapper;
 import com.vehicle.server.module.vehicle.entity.Vehicle;
 import com.vehicle.server.module.vehicle.enums.VehicleStatus;
@@ -69,7 +71,7 @@ public class ReservationService {
 
     private void notifyAdmins(Long applicantId, VehicleReservation reservation, Vehicle vehicle) {
         List<SysUser> admins = userMapper.selectList(new LambdaQueryWrapper<SysUser>()
-                .in(SysUser::getRole, 1, 2)
+                .in(SysUser::getRole, UserRole.MANAGER.getCode(), UserRole.ADMIN.getCode())
                 .eq(SysUser::getDeleted, 0));
         if (admins.isEmpty()) {
             log.warn("没有管理员用户，无法发送用车申请通知");
@@ -118,11 +120,14 @@ public class ReservationService {
     }
 
     @Transactional(readOnly = true)
-    public PageResponse<ReservationResponse> list(PageRequest pageRequest, ReservationListRequest query) {
+    public PageResponse<ReservationResponse> list(Long currentUserId, PageRequest pageRequest, ReservationListRequest query) {
+        boolean isManagerOrAdmin = SecurityUtils.isManagerOrAdmin();
+        Long forcedUserId = isManagerOrAdmin ? query.userId() : currentUserId;
+
         LambdaQueryWrapper<VehicleReservation> wrapper = new LambdaQueryWrapper<VehicleReservation>()
                 .eq(VehicleReservation::getDeleted, NOT_DELETED)
                 .eq(query.vehicleId() != null, VehicleReservation::getVehicleId, query.vehicleId())
-                .eq(query.userId() != null, VehicleReservation::getUserId, query.userId())
+                .eq(forcedUserId != null, VehicleReservation::getUserId, forcedUserId)
                 .eq(query.status() != null, VehicleReservation::getStatus, query.status())
                 .orderByDesc(VehicleReservation::getCreatedTime);
         IPage<VehicleReservation> page = reservationMapper.selectPage(
@@ -151,6 +156,45 @@ public class ReservationService {
                         userMap.get(r.getUserId()),
                         userMap.get(r.getAuditUserId())))
                 .toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<VehicleScheduleItem> schedule(Long vehicleId) {
+        LambdaQueryWrapper<VehicleReservation> wrapper = new LambdaQueryWrapper<VehicleReservation>()
+                .eq(VehicleReservation::getDeleted, NOT_DELETED)
+                .in(VehicleReservation::getStatus,
+                        ReservationStatus.APPLYING,
+                        ReservationStatus.APPROVED,
+                        ReservationStatus.IN_USE)
+                .eq(vehicleId != null, VehicleReservation::getVehicleId, vehicleId)
+                .orderByAsc(VehicleReservation::getStartTime);
+        List<VehicleReservation> reservations = reservationMapper.selectList(wrapper);
+
+        Set<Long> vehicleIds = reservations.stream()
+                .map(VehicleReservation::getVehicleId).collect(Collectors.toSet());
+        Set<Long> userIds = reservations.stream()
+                .map(VehicleReservation::getUserId).collect(Collectors.toSet());
+
+        Map<Long, Vehicle> vehicleMap = vehicleIds.isEmpty() ? Map.of()
+                : vehicleMapper.selectBatchIds(vehicleIds).stream()
+                .collect(Collectors.toMap(Vehicle::getId, v -> v));
+        Map<Long, SysUser> userMap = userIds.isEmpty() ? Map.of()
+                : userMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(SysUser::getId, u -> u));
+
+        return reservations.stream().map(r -> {
+            Vehicle v = vehicleMap.get(r.getVehicleId());
+            SysUser u = userMap.get(r.getUserId());
+            return new VehicleScheduleItem(
+                    r.getId(),
+                    r.getVehicleId(),
+                    v != null ? v.getPlateNumber() : "",
+                    u != null ? u.getUsername() : "",
+                    r.getPurpose(),
+                    r.getStartTime(),
+                    r.getEndTime(),
+                    r.getStatus().getCode());
+        }).toList();
     }
 
     @Transactional(readOnly = true)
@@ -207,6 +251,9 @@ public class ReservationService {
         if (reservation.getStatus() != ReservationStatus.APPLYING) {
             throw new BusinessException(ErrorCode.INVALID_STATUS_TRANSITION);
         }
+        if (reservation.getUserId().equals(auditorId)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
 
         reservation.setAuditUserId(auditorId);
         reservation.setAuditTime(LocalDateTime.now());
@@ -234,8 +281,11 @@ public class ReservationService {
     }
 
     @Transactional
-    public ReservationResponse returnVehicle(Long id, ReturnRequest request) {
+    public ReservationResponse returnVehicle(Long id, Long currentUserId, ReturnRequest request) {
         VehicleReservation reservation = findReservation(id);
+        if (!SecurityUtils.isManagerOrAdmin() && !reservation.getUserId().equals(currentUserId)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
         if (reservation.getStatus() != ReservationStatus.APPROVED
                 && reservation.getStatus() != ReservationStatus.IN_USE) {
             throw new BusinessException(ErrorCode.INVALID_STATUS_TRANSITION);

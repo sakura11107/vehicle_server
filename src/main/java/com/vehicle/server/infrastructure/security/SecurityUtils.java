@@ -1,5 +1,7 @@
 package com.vehicle.server.infrastructure.security;
 
+import com.vehicle.server.common.exception.BusinessException;
+import com.vehicle.server.common.exception.ErrorCode;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 
@@ -17,13 +19,13 @@ public class SecurityUtils {
     public static Long getCurrentUserId() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth == null || !auth.isAuthenticated()) {
-            throw new IllegalStateException("用户未登录");
+            throw new BusinessException(ErrorCode.UNAUTHORIZED);
         }
         Object details = auth.getDetails();
         if (details instanceof JwtUserDetails jwtUserDetails) {
             return jwtUserDetails.getUserId();
         }
-        throw new IllegalStateException("无法获取用户ID");
+        throw new BusinessException(ErrorCode.UNAUTHORIZED);
     }
 
     /**
@@ -32,8 +34,34 @@ public class SecurityUtils {
     public static String getCurrentUsername() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth == null || !auth.isAuthenticated()) {
-            throw new IllegalStateException("用户未登录");
+            throw new BusinessException(ErrorCode.UNAUTHORIZED);
         }
         return auth.getName();
+    }
+
+    /**
+     * 判断当前登录用户是否拥有指定权限字符串（如 ROLE_ADMIN）。
+     */
+    public static boolean hasAuthority(String authority) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated()) {
+            return false;
+        }
+        return auth.getAuthorities().stream()
+                .anyMatch(granted -> granted.getAuthority().equals(authority));
+    }
+
+    /**
+     * 当前登录用户是否为车辆管理员或系统管理员。
+     */
+    public static boolean isManagerOrAdmin() {
+        return hasAuthority("ROLE_MANAGER") || hasAuthority("ROLE_ADMIN");
+    }
+
+    /**
+     * 当前登录用户是否为系统管理员。
+     */
+    public static boolean isAdmin() {
+        return hasAuthority("ROLE_ADMIN");
     }
 }
