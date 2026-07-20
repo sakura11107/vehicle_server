@@ -5,7 +5,12 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.vehicle.server.common.dto.PageRequest;
 import com.vehicle.server.common.dto.PageResponse;
+import com.vehicle.server.common.exception.BusinessException;
+import com.vehicle.server.common.exception.ErrorCode;
 import com.vehicle.server.common.id.SnowflakeIdGenerator;
+import com.vehicle.server.module.reservation.entity.VehicleReservation;
+import com.vehicle.server.module.reservation.enums.ReservationStatus;
+import com.vehicle.server.module.reservation.mapper.VehicleReservationMapper;
 import com.vehicle.server.module.vehicle.dto.VehicleCreateRequest;
 import com.vehicle.server.module.vehicle.dto.VehicleListRequest;
 import com.vehicle.server.module.vehicle.dto.VehicleResponse;
@@ -13,10 +18,8 @@ import com.vehicle.server.module.vehicle.dto.VehicleUpdateRequest;
 import com.vehicle.server.module.vehicle.entity.Vehicle;
 import com.vehicle.server.module.vehicle.mapper.VehicleMapper;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDateTime;
 
@@ -29,6 +32,7 @@ public class VehicleService {
 
     private static final Integer NOT_DELETED = 0;
     private final VehicleMapper vehicleMapper;
+    private final VehicleReservationMapper reservationMapper;
     private final SnowflakeIdGenerator idGenerator;
 
     @Transactional
@@ -86,6 +90,16 @@ public class VehicleService {
     @Transactional
     public void delete(Long id) {
         Vehicle vehicle = findActiveVehicle(id);
+
+        long activeCount = reservationMapper.selectCount(new LambdaQueryWrapper<VehicleReservation>()
+                .eq(VehicleReservation::getVehicleId, id)
+                .eq(VehicleReservation::getDeleted, 0)
+                .in(VehicleReservation::getStatus,
+                        ReservationStatus.APPLYING, ReservationStatus.APPROVED));
+        if (activeCount > 0) {
+            throw new BusinessException(ErrorCode.VEHICLE_HAS_ACTIVE_RESERVATIONS);
+        }
+
         vehicle.setDeleted(1);
         vehicle.setUpdatedTime(LocalDateTime.now());
         vehicleMapper.updateById(vehicle);
@@ -94,7 +108,7 @@ public class VehicleService {
     private Vehicle findActiveVehicle(Long id) {
         Vehicle vehicle = vehicleMapper.selectById(id);
         if (vehicle == null || vehicle.getDeleted() != NOT_DELETED) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "车辆不存在");
+            throw new BusinessException(ErrorCode.VEHICLE_NOT_FOUND);
         }
         return vehicle;
     }
@@ -107,7 +121,7 @@ public class VehicleService {
             query.ne(Vehicle::getId, excludedId);
         }
         if (vehicleMapper.selectCount(query) > 0) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "车牌号已存在");
+            throw new BusinessException(ErrorCode.VEHICLE_PLATE_EXISTS);
         }
     }
 

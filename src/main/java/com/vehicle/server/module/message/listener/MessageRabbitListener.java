@@ -3,11 +3,13 @@ package com.vehicle.server.module.message.listener;
 import com.vehicle.server.module.message.entity.Message;
 import com.vehicle.server.module.message.service.MessageService;
 import com.vehicle.server.module.message.dto.MessageResponse;
+import com.vehicle.server.infrastructure.mq.RabbitMQConfig;
 import com.vehicle.server.infrastructure.websocket.WebSocketSessionManager;
 import com.vehicle.server.module.system.user.entity.SysUser;
 import com.vehicle.server.module.system.user.mapper.SysUserMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
@@ -24,26 +26,32 @@ public class MessageRabbitListener {
     private final WebSocketSessionManager sessionManager;
     private final SysUserMapper userMapper;
 
-    @RabbitListener(queues = "message.send.queue")
+    @RabbitListener(queues = RabbitMQConfig.QUEUE_SEND)
     public void handleMessage(Map<String, String> payload) {
-        Long senderId = Long.parseLong(payload.get("senderId"));
-        Long receiverId = Long.parseLong(payload.get("receiverId"));
-        String content = payload.get("content");
+        try {
+            Long senderId = Long.parseLong(payload.get("senderId"));
+            Long receiverId = Long.parseLong(payload.get("receiverId"));
+            String content = payload.get("content");
 
-        log.info("收到MQ消息: sender={}, receiver={}", senderId, receiverId);
+            log.info("收到MQ消息: sender={}, receiver={}", senderId, receiverId);
 
-        Message message = messageService.send(senderId, receiverId, content);
-        MessageResponse response = messageService.toResponse(message);
+            Message message = messageService.send(senderId, receiverId, content);
+            MessageResponse response = messageService.toResponse(message);
 
-        if (sessionManager.isUserOnline(receiverId)) {
-            SysUser receiver = userMapper.selectById(receiverId);
-            if (receiver != null) {
-                messagingTemplate.convertAndSendToUser(
-                        receiver.getUsername(),
-                        "/queue/messages",
-                        response
-                );
+            if (sessionManager.isUserOnline(receiverId)) {
+                SysUser receiver = userMapper.selectById(receiverId);
+                if (receiver != null) {
+                    messagingTemplate.convertAndSendToUser(
+                            receiver.getUsername(),
+                            "/queue/messages",
+                            response
+                    );
+                }
             }
+        } catch (Exception e) {
+            log.error("MQ消息处理失败，消息将进入死信队列: {}", e.getMessage(), e);
+            // 抛出 AmqpRejectAndDontRequeueException 拒绝消息，不requeue，进入死信队列
+            throw new AmqpRejectAndDontRequeueException("消息处理失败", e);
         }
     }
 }

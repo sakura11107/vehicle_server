@@ -1,6 +1,8 @@
 package com.vehicle.server.module.message.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.vehicle.server.common.dto.PageRequest;
 import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.common.exception.BusinessException;
@@ -73,50 +75,39 @@ public class MessageService {
                         .eq(Message::getReceiverId, currentUserId))
                 .orderByDesc(Message::getCreatedTime);
 
-        List<Message> allMessages = messageMapper.selectList(wrapper);
-
-        int total = allMessages.size();
-        int page = pageRequest.page();
-        int size = pageRequest.size();
-        int offset = (page - 1) * size;
-        List<Message> pagedMessages = (offset < total)
-                ? allMessages.subList(offset, Math.min(offset + size, total))
-                : List.of();
+        IPage<Message> page = messageMapper.selectPage(
+                new Page<>(pageRequest.page(), pageRequest.size()), wrapper);
+        List<Message> pagedMessages = page.getRecords();
+        int total = (int) page.getTotal();
+        int totalPages = (int) page.getPages();
 
         Set<Long> userIds = Set.of(currentUserId, otherUserId);
         Map<Long, String> userMap = userMapper.selectBatchIds(userIds).stream()
                 .collect(Collectors.toMap(SysUser::getId, SysUser::getUsername));
 
-        int totalPages = (total + size - 1) / size;
         List<MessageResponse> records = pagedMessages.stream()
                 .map(m -> MessageResponse.from(m, userMap.get(m.getSenderId()), userMap.get(m.getReceiverId())))
                 .toList();
 
-        return new PageResponse<>(records, total, page, size, totalPages);
+        return new PageResponse<>(records, total, pageRequest.page(), pageRequest.size(), totalPages);
     }
 
     @Transactional(readOnly = true)
-    public List<ConversationResponse> getConversations(Long currentUserId) {
-        LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
-                .eq(Message::getDeleted, NOT_DELETED)
-                .and(w -> w
-                        .eq(Message::getSenderId, currentUserId)
-                        .or(inner -> inner.eq(Message::getReceiverId, currentUserId)))
-                .orderByDesc(Message::getCreatedTime);
-
-        List<Message> allMessages = messageMapper.selectList(wrapper);
-
-        Map<Long, Message> lastMessageMap = new LinkedHashMap<>();
-        for (Message msg : allMessages) {
-            Long otherUserId = msg.getSenderId().equals(currentUserId) ? msg.getReceiverId() : msg.getSenderId();
-            lastMessageMap.putIfAbsent(otherUserId, msg);
+    public PageResponse<ConversationResponse> getConversations(Long currentUserId, PageRequest pageRequest) {
+        long total = messageMapper.countConversations(currentUserId);
+        if (total == 0) {
+            return new PageResponse<>(List.of(), 0, pageRequest.page(), pageRequest.size(), 0);
         }
 
-        if (lastMessageMap.isEmpty()) {
-            return List.of();
-        }
+        int offset = (pageRequest.page() - 1) * pageRequest.size();
+        int totalPages = (int) Math.ceil((double) total / pageRequest.size());
 
-        Set<Long> otherUserIds = lastMessageMap.keySet();
+        List<Message> latestMessages = messageMapper.selectLatestMessagesPerContact(
+                currentUserId, pageRequest.size(), offset);
+
+        Set<Long> otherUserIds = latestMessages.stream()
+                .map(m -> m.getSenderId().equals(currentUserId) ? m.getReceiverId() : m.getSenderId())
+                .collect(Collectors.toSet());
 
         Map<Long, String> userMap = userMapper.selectBatchIds(otherUserIds).stream()
                 .collect(Collectors.toMap(SysUser::getId, SysUser::getUsername));
@@ -130,10 +121,10 @@ public class MessageService {
         Map<Long, Long> unreadCountMap = unreadMessages.stream()
                 .collect(Collectors.groupingBy(Message::getSenderId, Collectors.counting()));
 
-        return lastMessageMap.entrySet().stream()
-                .map(entry -> {
-                    Long otherUserId = entry.getKey();
-                    Message lastMsg = entry.getValue();
+        List<ConversationResponse> records = latestMessages.stream()
+                .map(lastMsg -> {
+                    Long otherUserId = lastMsg.getSenderId().equals(currentUserId)
+                            ? lastMsg.getReceiverId() : lastMsg.getSenderId();
                     long unreadCount = unreadCountMap.getOrDefault(otherUserId, 0L);
                     return new ConversationResponse(
                             otherUserId,
@@ -144,6 +135,8 @@ public class MessageService {
                     );
                 })
                 .toList();
+
+        return new PageResponse<>(records, total, pageRequest.page(), pageRequest.size(), totalPages);
     }
 
     @Transactional

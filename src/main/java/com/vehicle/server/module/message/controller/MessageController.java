@@ -47,10 +47,10 @@ public class MessageController {
     }
 
     @GetMapping("/conversations")
-    @Operation(summary = "会话列表", description = "每个联系人的最后一条消息")
-    public ApiResponse<List<ConversationResponse>> conversations() {
+    @Operation(summary = "会话列表", description = "每个联系人的最后一条消息，支持分页")
+    public ApiResponse<PageResponse<ConversationResponse>> conversations(@Valid PageRequest pageRequest) {
         Long currentUserId = SecurityUtils.getCurrentUserId();
-        return ApiResponse.success(messageService.getConversations(currentUserId));
+        return ApiResponse.success(messageService.getConversations(currentUserId, pageRequest));
     }
 
     @GetMapping("/{userId}")

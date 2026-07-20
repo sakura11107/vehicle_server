@@ -11,7 +11,6 @@ public enum ReservationStatus {
     APPLYING(0, "申请中"),
     APPROVED(1, "已审核"),
     CANCELLED(2, "已取消"),
-    IN_USE(3, "使用中"),
     RETURNED(4, "已还车"),
     REJECTED(5, "已拒绝");
 

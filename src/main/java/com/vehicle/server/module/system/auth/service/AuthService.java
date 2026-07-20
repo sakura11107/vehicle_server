@@ -31,11 +31,13 @@ public class AuthService {
     @Transactional
     public UserResponse register(RegisterRequest request) {
         if (userMapper.selectCount(new LambdaQueryWrapper<SysUser>()
-                .eq(SysUser::getUsername, request.username())) > 0) {
+                .eq(SysUser::getUsername, request.username())
+                .eq(SysUser::getDeleted, NOT_DELETED)) > 0) {
             throw new BusinessException(ErrorCode.USERNAME_EXISTS);
         }
         if (userMapper.selectCount(new LambdaQueryWrapper<SysUser>()
-                .eq(SysUser::getEmail, request.email())) > 0) {
+                .eq(SysUser::getEmail, request.email())
+                .eq(SysUser::getDeleted, NOT_DELETED)) > 0) {
             throw new BusinessException(ErrorCode.EMAIL_EXISTS);
         }
 

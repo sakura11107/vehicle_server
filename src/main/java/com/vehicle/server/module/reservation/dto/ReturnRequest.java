@@ -1,6 +1,7 @@
 package com.vehicle.server.module.reservation.dto;
 
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.PositiveOrZero;
 
 import java.math.BigDecimal;
 
@@ -9,9 +10,9 @@ import java.math.BigDecimal;
  */
 public record ReturnRequest(
         @NotNull Integer returnMileage,
-        @NotNull BigDecimal returnFuel,
-        BigDecimal parkingFee,
-        BigDecimal fuelFee,
-        BigDecimal otherFee,
+        @NotNull @PositiveOrZero BigDecimal returnFuel,
+        @PositiveOrZero BigDecimal parkingFee,
+        @PositiveOrZero BigDecimal fuelFee,
+        @PositiveOrZero BigDecimal otherFee,
         String returnRemark) {
 }

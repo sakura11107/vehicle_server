@@ -8,6 +8,7 @@ import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.common.exception.BusinessException;
 import com.vehicle.server.common.exception.ErrorCode;
 import com.vehicle.server.common.id.SnowflakeIdGenerator;
+import com.vehicle.server.infrastructure.mq.RabbitMQConfig;
 import com.vehicle.server.infrastructure.security.SecurityUtils;
 import com.vehicle.server.module.reservation.dto.*;
 import com.vehicle.server.module.reservation.entity.VehicleReservation;
@@ -45,8 +46,13 @@ public class ReservationService {
 
     @Transactional
     public ReservationResponse create(Long currentUserId, ReservationCreateRequest request) {
+        if (!request.endTime().isAfter(request.startTime())) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED);
+        }
+
         Vehicle vehicle = findAvailableVehicle(request.vehicleId());
         LocalDateTime now = LocalDateTime.now();
+        lockConflictingReservations(request.vehicleId(), request.startTime(), request.endTime(), null);
         ensureNoConflict(request.vehicleId(), request.startTime(), request.endTime(), null);
 
         VehicleReservation reservation = new VehicleReservation();
@@ -72,7 +78,8 @@ public class ReservationService {
     private void notifyAdmins(Long applicantId, VehicleReservation reservation, Vehicle vehicle) {
         List<SysUser> admins = userMapper.selectList(new LambdaQueryWrapper<SysUser>()
                 .in(SysUser::getRole, UserRole.MANAGER.getCode(), UserRole.ADMIN.getCode())
-                .eq(SysUser::getDeleted, 0));
+                .eq(SysUser::getDeleted, 0)
+                .ne(SysUser::getId, applicantId));
         if (admins.isEmpty()) {
             log.warn("没有管理员用户，无法发送用车申请通知");
             return;
@@ -87,7 +94,7 @@ public class ReservationService {
 
         for (SysUser admin : admins) {
             try {
-                rabbitTemplate.convertAndSend("message.exchange", "message.send", Map.of(
+                rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE, RabbitMQConfig.ROUTING_KEY, Map.of(
                         "senderId", applicantId.toString(),
                         "receiverId", admin.getId().toString(),
                         "content", content
@@ -108,7 +115,7 @@ public class ReservationService {
                 request.remark() != null ? request.remark() : "无");
 
         try {
-            rabbitTemplate.convertAndSend("message.exchange", "message.send", Map.of(
+            rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE, RabbitMQConfig.ROUTING_KEY, Map.of(
                     "senderId", auditorId.toString(),
                     "receiverId", reservation.getUserId().toString(),
                     "content", content
@@ -164,8 +171,7 @@ public class ReservationService {
                 .eq(VehicleReservation::getDeleted, NOT_DELETED)
                 .in(VehicleReservation::getStatus,
                         ReservationStatus.APPLYING,
-                        ReservationStatus.APPROVED,
-                        ReservationStatus.IN_USE)
+                        ReservationStatus.APPROVED)
                 .eq(vehicleId != null, VehicleReservation::getVehicleId, vehicleId)
                 .orderByAsc(VehicleReservation::getStartTime);
         List<VehicleReservation> reservations = reservationMapper.selectList(wrapper);
@@ -209,6 +215,10 @@ public class ReservationService {
 
     @Transactional
     public ReservationResponse update(Long id, Long currentUserId, ReservationUpdateRequest request) {
+        if (!request.endTime().isAfter(request.startTime())) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED);
+        }
+
         VehicleReservation reservation = findReservation(id);
         if (reservation.getStatus() != ReservationStatus.APPLYING) {
             throw new BusinessException(ErrorCode.INVALID_STATUS_TRANSITION);
@@ -217,6 +227,7 @@ public class ReservationService {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
 
+        lockConflictingReservations(request.vehicleId(), request.startTime(), request.endTime(), id);
         ensureNoConflict(request.vehicleId(), request.startTime(), request.endTime(), id);
         reservation.setVehicleId(request.vehicleId());
         reservation.setStartTime(request.startTime());
@@ -262,16 +273,13 @@ public class ReservationService {
         reservation.setUpdatedTime(LocalDateTime.now());
         reservationMapper.updateById(reservation);
 
-        if (request.approved()) {
-            Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
-            if (vehicle != null && vehicle.getStatus() != VehicleStatus.IN_USE) {
-                vehicle.setStatus(VehicleStatus.IN_USE);
-                vehicle.setUpdatedTime(LocalDateTime.now());
-                vehicleMapper.updateById(vehicle);
-            }
+        Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
+        if (request.approved() && vehicle != null && vehicle.getStatus() != VehicleStatus.IN_USE) {
+            vehicle.setStatus(VehicleStatus.IN_USE);
+            vehicle.setUpdatedTime(LocalDateTime.now());
+            vehicleMapper.updateById(vehicle);
         }
 
-        Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
         SysUser user = userMapper.selectById(reservation.getUserId());
         SysUser auditUser = userMapper.selectById(auditorId);
 
@@ -286,9 +294,11 @@ public class ReservationService {
         if (!SecurityUtils.isManagerOrAdmin() && !reservation.getUserId().equals(currentUserId)) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
-        if (reservation.getStatus() != ReservationStatus.APPROVED
-                && reservation.getStatus() != ReservationStatus.IN_USE) {
+        if (reservation.getStatus() != ReservationStatus.APPROVED) {
             throw new BusinessException(ErrorCode.INVALID_STATUS_TRANSITION);
+        }
+        if (reservation.getPickupMileage() != null && request.returnMileage() < reservation.getPickupMileage()) {
+            throw new BusinessException(ErrorCode.RETURN_MILEAGE_LESS_THAN_PICKUP);
         }
 
         reservation.setStatus(ReservationStatus.RETURNED);
@@ -330,6 +340,21 @@ public class ReservationService {
             throw new BusinessException(ErrorCode.RESERVATION_NOT_FOUND);
         }
         return reservation;
+    }
+
+    private void lockConflictingReservations(Long vehicleId, LocalDateTime startTime,
+                                              LocalDateTime endTime, Long excludedId) {
+        LambdaQueryWrapper<VehicleReservation> wrapper = new LambdaQueryWrapper<VehicleReservation>()
+                .select(VehicleReservation::getId)
+                .eq(VehicleReservation::getVehicleId, vehicleId)
+                .eq(VehicleReservation::getDeleted, NOT_DELETED)
+                .notIn(VehicleReservation::getStatus, ReservationStatus.CANCELLED, ReservationStatus.REJECTED)
+                .lt(VehicleReservation::getStartTime, endTime)
+                .gt(VehicleReservation::getEndTime, startTime);
+        if (excludedId != null) {
+            wrapper.ne(VehicleReservation::getId, excludedId);
+        }
+        reservationMapper.selectList(wrapper.last("FOR UPDATE"));
     }
 
     private void ensureNoConflict(Long vehicleId, LocalDateTime startTime, LocalDateTime endTime, Long excludedId) {
