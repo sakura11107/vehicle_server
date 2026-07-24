@@ -19,12 +19,17 @@ import java.util.List;
 public class CustomUserDetailsService implements UserDetailsService {
 
     private final SysUserMapper userMapper;
+    private final UserDetailsCache userDetailsCache;
 
     @Override
     public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        UserDetails cached = userDetailsCache.get(username);
+        if (cached != null) {
+            return cached;
+        }
+
         SysUser user = userMapper.selectOne(new LambdaQueryWrapper<SysUser>()
-                .eq(SysUser::getUsername, username)
-                .eq(SysUser::getDeleted, 0));
+                .eq(SysUser::getUsername, username));
 
         if (user == null) {
             throw new UsernameNotFoundException("用户不存在: " + username);
@@ -34,11 +39,12 @@ public class CustomUserDetailsService implements UserDetailsService {
         }
 
         String role = UserRole.fromCode(user.getRole()).getAuthority();
-
-        return new User(
+        UserDetails details = new User(
                 user.getUsername(),
                 user.getPassword(),
                 List.of(new SimpleGrantedAuthority(role))
         );
+        userDetailsCache.put(username, details);
+        return details;
     }
 }

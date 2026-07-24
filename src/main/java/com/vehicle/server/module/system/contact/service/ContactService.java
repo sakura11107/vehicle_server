@@ -10,7 +10,10 @@ import com.vehicle.server.module.system.user.mapper.SysUserMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
@@ -22,7 +25,6 @@ public class ContactService {
 
     public List<ContactGroupResponse> getTree() {
         List<SysUser> users = userMapper.selectList(new LambdaQueryWrapper<SysUser>()
-                .eq(SysUser::getDeleted, 0)
                 .eq(SysUser::getStatus, 1));
 
         Set<Long> onlineUserIds = sessionManager.getOnlineUsers();
@@ -32,10 +34,9 @@ public class ContactService {
 
         List<ContactGroupResponse> groups = new ArrayList<>();
 
-        // 管理员组（ADMIN + MANAGER）
         List<SysUser> admins = new ArrayList<>();
-        admins.addAll(grouped.getOrDefault(2, List.of())); // ADMIN
-        admins.addAll(grouped.getOrDefault(1, List.of())); // MANAGER
+        admins.addAll(grouped.getOrDefault(2, List.of()));
+        admins.addAll(grouped.getOrDefault(1, List.of()));
         if (!admins.isEmpty()) {
             int totalCount = admins.size();
             int onlineCount = (int) admins.stream()
@@ -44,7 +45,6 @@ public class ContactService {
             groups.add(new ContactGroupResponse("管理员", 2, totalCount, onlineCount));
         }
 
-        // 普通用户组
         List<SysUser> normalUsers = grouped.getOrDefault(0, List.of());
         if (!normalUsers.isEmpty()) {
             int totalCount = normalUsers.size();
@@ -62,17 +62,13 @@ public class ContactService {
 
         List<SysUser> users;
         if (role == 2) {
-            // 管理员组：返回 ADMIN 和 MANAGER，ADMIN 在前
             users = userMapper.selectList(new LambdaQueryWrapper<SysUser>()
-                    .eq(SysUser::getDeleted, 0)
                     .eq(SysUser::getStatus, 1)
                     .in(SysUser::getRole, 1, 2)
                     .orderByDesc(SysUser::getRole)
                     .orderByAsc(SysUser::getUsername));
         } else {
-            // 普通用户组
             users = userMapper.selectList(new LambdaQueryWrapper<SysUser>()
-                    .eq(SysUser::getDeleted, 0)
                     .eq(SysUser::getStatus, 1)
                     .eq(SysUser::getRole, 0)
                     .orderByAsc(SysUser::getUsername));
@@ -91,7 +87,6 @@ public class ContactService {
         Set<Long> onlineUserIds = sessionManager.getOnlineUsers();
 
         List<SysUser> users = userMapper.selectList(new LambdaQueryWrapper<SysUser>()
-                .eq(SysUser::getDeleted, 0)
                 .eq(SysUser::getStatus, 1)
                 .like(SysUser::getUsername, keyword.trim())
                 .orderByDesc(SysUser::getRole)

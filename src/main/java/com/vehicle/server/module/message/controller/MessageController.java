@@ -7,18 +7,12 @@ import com.vehicle.server.infrastructure.security.SecurityUtils;
 import com.vehicle.server.module.message.dto.ConversationResponse;
 import com.vehicle.server.module.message.dto.MessageCreateRequest;
 import com.vehicle.server.module.message.dto.MessageResponse;
-import com.vehicle.server.module.message.entity.Message;
 import com.vehicle.server.module.message.service.MessageService;
-import com.vehicle.server.module.system.user.entity.SysUser;
-import com.vehicle.server.module.system.user.mapper.SysUserMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.web.bind.annotation.*;
-
-import java.util.List;
 
 @RestController
 @RequestMapping("/api/messages")
@@ -27,23 +21,13 @@ import java.util.List;
 public class MessageController {
 
     private final MessageService messageService;
-    private final SimpMessagingTemplate messagingTemplate;
-    private final SysUserMapper userMapper;
 
     @PostMapping
-    @Operation(summary = "发送私信", description = "同步保存并返回消息，同时推送给接收方")
-    public ApiResponse<MessageResponse> send(@Valid @RequestBody MessageCreateRequest request) {
+    @Operation(summary = "发送私信", description = "投递到消息队列异步落库并推送")
+    public ApiResponse<Void> send(@Valid @RequestBody MessageCreateRequest request) {
         Long senderId = SecurityUtils.getCurrentUserId();
-        Message message = messageService.send(senderId, request.receiverId(), request.content());
-        MessageResponse response = messageService.toResponse(message);
-
-        SysUser receiver = userMapper.selectById(request.receiverId());
-        if (receiver != null) {
-            messagingTemplate.convertAndSendToUser(
-                    receiver.getUsername(), "/queue/messages", response);
-        }
-
-        return ApiResponse.success(response);
+        messageService.enqueue(senderId, request.receiverId(), request.content());
+        return ApiResponse.success(null);
     }
 
     @GetMapping("/conversations")

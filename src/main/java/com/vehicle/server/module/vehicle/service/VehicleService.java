@@ -8,32 +8,36 @@ import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.common.exception.BusinessException;
 import com.vehicle.server.common.exception.ErrorCode;
 import com.vehicle.server.common.id.SnowflakeIdGenerator;
-import com.vehicle.server.module.reservation.entity.VehicleReservation;
-import com.vehicle.server.module.reservation.enums.ReservationStatus;
-import com.vehicle.server.module.reservation.mapper.VehicleReservationMapper;
+import com.vehicle.server.module.reservation.service.ReservationService;
 import com.vehicle.server.module.vehicle.dto.VehicleCreateRequest;
 import com.vehicle.server.module.vehicle.dto.VehicleListRequest;
 import com.vehicle.server.module.vehicle.dto.VehicleResponse;
 import com.vehicle.server.module.vehicle.dto.VehicleUpdateRequest;
 import com.vehicle.server.module.vehicle.entity.Vehicle;
+import com.vehicle.server.module.vehicle.enums.VehicleStatus;
 import com.vehicle.server.module.vehicle.mapper.VehicleMapper;
-import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.Map;
+import java.util.stream.Collectors;
 
-/**
- * 车辆基础信息的业务服务。
- */
 @Service
-@RequiredArgsConstructor
 public class VehicleService {
 
-    private static final Integer NOT_DELETED = 0;
     private final VehicleMapper vehicleMapper;
-    private final VehicleReservationMapper reservationMapper;
     private final SnowflakeIdGenerator idGenerator;
+    private final ReservationService reservationService;
+
+    public VehicleService(VehicleMapper vehicleMapper,
+                          SnowflakeIdGenerator idGenerator,
+                          @Lazy ReservationService reservationService) {
+        this.vehicleMapper = vehicleMapper;
+        this.idGenerator = idGenerator;
+        this.reservationService = reservationService;
+    }
 
     @Transactional
     public VehicleResponse create(VehicleCreateRequest request) {
@@ -41,10 +45,9 @@ public class VehicleService {
         Vehicle vehicle = new Vehicle();
         vehicle.setId(idGenerator.nextId());
         apply(vehicle, request);
-        LocalDateTime now = LocalDateTime.now();
-        vehicle.setCreatedTime(now);
-        vehicle.setUpdatedTime(now);
-        vehicle.setDeleted(NOT_DELETED);
+        if (vehicle.getStatus() == null) {
+            vehicle.setStatus(VehicleStatus.IDLE);
+        }
         vehicleMapper.insert(vehicle);
         return VehicleResponse.from(vehicle);
     }
@@ -52,7 +55,6 @@ public class VehicleService {
     @Transactional(readOnly = true)
     public PageResponse<VehicleResponse> list(PageRequest pageRequest, VehicleListRequest query) {
         LambdaQueryWrapper<Vehicle> wrapper = new LambdaQueryWrapper<Vehicle>()
-                .eq(Vehicle::getDeleted, NOT_DELETED)
                 .like(query.plateNumber() != null && !query.plateNumber().isBlank(),
                         Vehicle::getPlateNumber, query.plateNumber())
                 .like(query.brand() != null && !query.brand().isBlank(),
@@ -72,51 +74,67 @@ public class VehicleService {
 
     @Transactional(readOnly = true)
     public VehicleResponse getById(Long id) {
-        return VehicleResponse.from(findActiveVehicle(id));
+        return VehicleResponse.from(requireVehicle(id));
+    }
+
+    @Transactional(readOnly = true)
+    public Vehicle requireVehicle(Long id) {
+        Vehicle vehicle = vehicleMapper.selectById(id);
+        if (vehicle == null) {
+            throw new BusinessException(ErrorCode.VEHICLE_NOT_FOUND);
+        }
+        return vehicle;
+    }
+
+    @Transactional(readOnly = true)
+    public Map<Long, Vehicle> mapByIds(Collection<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return Map.of();
+        }
+        return vehicleMapper.selectByIds(ids).stream()
+                .collect(Collectors.toMap(Vehicle::getId, v -> v));
+    }
+
+    /**
+     * 根据是否仍有生效预约，同步车辆占用状态（维保中不自动改动）。
+     */
+    @Transactional
+    public void syncOccupationStatus(Long vehicleId) {
+        Vehicle vehicle = requireVehicle(vehicleId);
+        if (vehicle.getStatus() == VehicleStatus.MAINTENANCE) {
+            return;
+        }
+        boolean active = reservationService.hasActiveReservations(vehicleId);
+        VehicleStatus target = active ? VehicleStatus.RESERVED : VehicleStatus.IDLE;
+        if (vehicle.getStatus() != target) {
+            vehicle.setStatus(target);
+            vehicleMapper.updateById(vehicle);
+        }
     }
 
     @Transactional
     public VehicleResponse update(Long id, VehicleUpdateRequest request) {
-        Vehicle vehicle = findActiveVehicle(id);
+        Vehicle vehicle = requireVehicle(id);
         if (!vehicle.getPlateNumber().equals(request.plateNumber())) {
             ensurePlateNumberUnique(request.plateNumber(), id);
         }
         apply(vehicle, request);
-        vehicle.setUpdatedTime(LocalDateTime.now());
         vehicleMapper.updateById(vehicle);
         return VehicleResponse.from(vehicle);
     }
 
     @Transactional
     public void delete(Long id) {
-        Vehicle vehicle = findActiveVehicle(id);
-
-        long activeCount = reservationMapper.selectCount(new LambdaQueryWrapper<VehicleReservation>()
-                .eq(VehicleReservation::getVehicleId, id)
-                .eq(VehicleReservation::getDeleted, 0)
-                .in(VehicleReservation::getStatus,
-                        ReservationStatus.APPLYING, ReservationStatus.APPROVED));
-        if (activeCount > 0) {
+        requireVehicle(id);
+        if (reservationService.hasActiveReservations(id)) {
             throw new BusinessException(ErrorCode.VEHICLE_HAS_ACTIVE_RESERVATIONS);
         }
-
-        vehicle.setDeleted(1);
-        vehicle.setUpdatedTime(LocalDateTime.now());
-        vehicleMapper.updateById(vehicle);
-    }
-
-    private Vehicle findActiveVehicle(Long id) {
-        Vehicle vehicle = vehicleMapper.selectById(id);
-        if (vehicle == null || vehicle.getDeleted() != NOT_DELETED) {
-            throw new BusinessException(ErrorCode.VEHICLE_NOT_FOUND);
-        }
-        return vehicle;
+        vehicleMapper.deleteById(id);
     }
 
     private void ensurePlateNumberUnique(String plateNumber, Long excludedId) {
         LambdaQueryWrapper<Vehicle> query = new LambdaQueryWrapper<Vehicle>()
-                .eq(Vehicle::getPlateNumber, plateNumber)
-                .eq(Vehicle::getDeleted, NOT_DELETED);
+                .eq(Vehicle::getPlateNumber, plateNumber);
         if (excludedId != null) {
             query.ne(Vehicle::getId, excludedId);
         }

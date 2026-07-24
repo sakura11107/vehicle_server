@@ -8,21 +8,19 @@ import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.common.exception.BusinessException;
 import com.vehicle.server.common.exception.ErrorCode;
 import com.vehicle.server.common.id.SnowflakeIdGenerator;
-import com.vehicle.server.infrastructure.mq.RabbitMQConfig;
 import com.vehicle.server.infrastructure.security.SecurityUtils;
+import com.vehicle.server.module.message.service.MessageService;
 import com.vehicle.server.module.reservation.dto.*;
 import com.vehicle.server.module.reservation.entity.VehicleReservation;
 import com.vehicle.server.module.reservation.enums.ReservationStatus;
 import com.vehicle.server.module.reservation.mapper.VehicleReservationMapper;
 import com.vehicle.server.module.system.user.entity.SysUser;
-import com.vehicle.server.module.system.user.enums.UserRole;
-import com.vehicle.server.module.system.user.mapper.SysUserMapper;
+import com.vehicle.server.module.system.user.service.SysUserService;
 import com.vehicle.server.module.vehicle.entity.Vehicle;
 import com.vehicle.server.module.vehicle.enums.VehicleStatus;
-import com.vehicle.server.module.vehicle.mapper.VehicleMapper;
+import com.vehicle.server.module.vehicle.service.VehicleService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,12 +35,11 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ReservationService {
 
-    private static final Integer NOT_DELETED = 0;
     private final VehicleReservationMapper reservationMapper;
-    private final VehicleMapper vehicleMapper;
-    private final SysUserMapper userMapper;
+    private final VehicleService vehicleService;
+    private final SysUserService userService;
     private final SnowflakeIdGenerator idGenerator;
-    private final RabbitTemplate rabbitTemplate;
+    private final MessageService messageService;
 
     @Transactional
     public ReservationResponse create(Long currentUserId, ReservationCreateRequest request) {
@@ -50,8 +47,7 @@ public class ReservationService {
             throw new BusinessException(ErrorCode.VALIDATION_FAILED);
         }
 
-        Vehicle vehicle = findAvailableVehicle(request.vehicleId());
-        LocalDateTime now = LocalDateTime.now();
+        Vehicle vehicle = requireBookableVehicle(request.vehicleId());
         lockConflictingReservations(request.vehicleId(), request.startTime(), request.endTime(), null);
         ensureNoConflict(request.vehicleId(), request.startTime(), request.endTime(), null);
 
@@ -63,30 +59,35 @@ public class ReservationService {
         reservation.setEndTime(request.endTime());
         reservation.setPurpose(request.purpose());
         reservation.setStatus(ReservationStatus.APPLYING);
-        reservation.setDeleted(NOT_DELETED);
-        reservation.setCreatedTime(now);
-        reservation.setUpdatedTime(now);
         reservationMapper.insert(reservation);
 
-        SysUser user = userMapper.selectById(currentUserId);
+        vehicleService.syncOccupationStatus(request.vehicleId());
+        vehicle = vehicleService.requireVehicle(request.vehicleId());
 
+        SysUser user = userService.requireUser(currentUserId);
         notifyAdmins(currentUserId, reservation, vehicle);
 
         return ReservationResponse.from(reservation, vehicle, user, null);
     }
 
+    @Transactional(readOnly = true)
+    public boolean hasActiveReservations(Long vehicleId) {
+        return reservationMapper.selectCount(new LambdaQueryWrapper<VehicleReservation>()
+                .eq(VehicleReservation::getVehicleId, vehicleId)
+                .in(VehicleReservation::getStatus,
+                        ReservationStatus.APPLYING, ReservationStatus.APPROVED)) > 0;
+    }
+
     private void notifyAdmins(Long applicantId, VehicleReservation reservation, Vehicle vehicle) {
-        List<SysUser> admins = userMapper.selectList(new LambdaQueryWrapper<SysUser>()
-                .in(SysUser::getRole, UserRole.MANAGER.getCode(), UserRole.ADMIN.getCode())
-                .eq(SysUser::getDeleted, 0)
-                .ne(SysUser::getId, applicantId));
+        List<SysUser> admins = userService.listActiveManagersAndAdmins(applicantId);
         if (admins.isEmpty()) {
             log.warn("没有管理员用户，无法发送用车申请通知");
             return;
         }
 
+        SysUser applicant = userService.requireUser(applicantId);
         String content = String.format("用户 %s 申请使用车辆 %s（%s），用车时间：%s ~ %s，请及时审核。",
-                userMapper.selectById(applicantId).getUsername(),
+                applicant.getUsername(),
                 vehicle.getPlateNumber(),
                 vehicle.getBrand() + " " + vehicle.getModel(),
                 reservation.getStartTime(),
@@ -94,11 +95,7 @@ public class ReservationService {
 
         for (SysUser admin : admins) {
             try {
-                rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE, RabbitMQConfig.ROUTING_KEY, Map.of(
-                        "senderId", applicantId.toString(),
-                        "receiverId", admin.getId().toString(),
-                        "content", content
-                ));
+                messageService.enqueue(applicantId, admin.getId(), content);
                 log.info("用车申请通知已发送给管理员 {}: {}", admin.getId(), admin.getUsername());
             } catch (Exception e) {
                 log.error("发送用车申请通知给管理员 {} 失败: {}", admin.getId(), e.getMessage(), e);
@@ -115,11 +112,7 @@ public class ReservationService {
                 request.remark() != null ? request.remark() : "无");
 
         try {
-            rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE, RabbitMQConfig.ROUTING_KEY, Map.of(
-                    "senderId", auditorId.toString(),
-                    "receiverId", reservation.getUserId().toString(),
-                    "content", content
-            ));
+            messageService.enqueue(auditorId, reservation.getUserId(), content);
             log.info("审核结果通知已发送给用户 {}: {}", reservation.getUserId(), statusText);
         } catch (Exception e) {
             log.error("发送审核结果通知给用户 {} 失败: {}", reservation.getUserId(), e.getMessage(), e);
@@ -132,7 +125,6 @@ public class ReservationService {
         Long forcedUserId = isManagerOrAdmin ? query.userId() : currentUserId;
 
         LambdaQueryWrapper<VehicleReservation> wrapper = new LambdaQueryWrapper<VehicleReservation>()
-                .eq(VehicleReservation::getDeleted, NOT_DELETED)
                 .eq(query.vehicleId() != null, VehicleReservation::getVehicleId, query.vehicleId())
                 .eq(forcedUserId != null, VehicleReservation::getUserId, forcedUserId)
                 .eq(query.status() != null, VehicleReservation::getStatus, query.status())
@@ -142,37 +134,24 @@ public class ReservationService {
                 wrapper
         );
 
-        Set<Long> vehicleIds = page.getRecords().stream()
-                .map(VehicleReservation::getVehicleId).collect(Collectors.toSet());
-        Set<Long> userIds = page.getRecords().stream()
-                .map(VehicleReservation::getUserId).collect(Collectors.toSet());
-        page.getRecords().forEach(r -> {
-            if (r.getAuditUserId() != null) userIds.add(r.getAuditUserId());
-        });
-
-        Map<Long, Vehicle> vehicleMap = vehicleIds.isEmpty() ? Map.of()
-                : vehicleMapper.selectBatchIds(vehicleIds).stream()
-                .collect(Collectors.toMap(Vehicle::getId, v -> v));
-        Map<Long, SysUser> userMap = userIds.isEmpty() ? Map.of()
-                : userMapper.selectBatchIds(userIds).stream()
-                .collect(Collectors.toMap(SysUser::getId, u -> u));
-
-        return PageResponse.of(page, page.getRecords().stream()
-                .map(r -> ReservationResponse.from(r,
-                        vehicleMap.get(r.getVehicleId()),
-                        userMap.get(r.getUserId()),
-                        userMap.get(r.getAuditUserId())))
-                .toList());
+        return PageResponse.of(page, toResponses(page.getRecords()));
     }
 
     @Transactional(readOnly = true)
-    public List<VehicleScheduleItem> schedule(Long vehicleId) {
+    public List<VehicleScheduleItem> schedule(Long vehicleId, LocalDateTime from, LocalDateTime to) {
+        LocalDateTime rangeStart = from != null ? from : LocalDateTime.now().minusDays(7);
+        LocalDateTime rangeEnd = to != null ? to : LocalDateTime.now().plusDays(30);
+        if (!rangeEnd.isAfter(rangeStart)) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED);
+        }
+
         LambdaQueryWrapper<VehicleReservation> wrapper = new LambdaQueryWrapper<VehicleReservation>()
-                .eq(VehicleReservation::getDeleted, NOT_DELETED)
                 .in(VehicleReservation::getStatus,
                         ReservationStatus.APPLYING,
                         ReservationStatus.APPROVED)
                 .eq(vehicleId != null, VehicleReservation::getVehicleId, vehicleId)
+                .lt(VehicleReservation::getStartTime, rangeEnd)
+                .gt(VehicleReservation::getEndTime, rangeStart)
                 .orderByAsc(VehicleReservation::getStartTime);
         List<VehicleReservation> reservations = reservationMapper.selectList(wrapper);
 
@@ -181,12 +160,8 @@ public class ReservationService {
         Set<Long> userIds = reservations.stream()
                 .map(VehicleReservation::getUserId).collect(Collectors.toSet());
 
-        Map<Long, Vehicle> vehicleMap = vehicleIds.isEmpty() ? Map.of()
-                : vehicleMapper.selectBatchIds(vehicleIds).stream()
-                .collect(Collectors.toMap(Vehicle::getId, v -> v));
-        Map<Long, SysUser> userMap = userIds.isEmpty() ? Map.of()
-                : userMapper.selectBatchIds(userIds).stream()
-                .collect(Collectors.toMap(SysUser::getId, u -> u));
+        Map<Long, Vehicle> vehicleMap = vehicleService.mapByIds(vehicleIds);
+        Map<Long, SysUser> userMap = userService.mapByIds(userIds);
 
         return reservations.stream().map(r -> {
             Vehicle v = vehicleMap.get(r.getVehicleId());
@@ -204,13 +179,12 @@ public class ReservationService {
     }
 
     @Transactional(readOnly = true)
-    public ReservationResponse getById(Long id) {
+    public ReservationResponse getById(Long id, Long currentUserId) {
         VehicleReservation reservation = findReservation(id);
-        Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
-        SysUser user = userMapper.selectById(reservation.getUserId());
-        SysUser auditUser = reservation.getAuditUserId() != null
-                ? userMapper.selectById(reservation.getAuditUserId()) : null;
-        return ReservationResponse.from(reservation, vehicle, user, auditUser);
+        if (!SecurityUtils.isManagerOrAdmin() && !reservation.getUserId().equals(currentUserId)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        return toResponse(reservation);
     }
 
     @Transactional
@@ -227,18 +201,22 @@ public class ReservationService {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
 
+        Long oldVehicleId = reservation.getVehicleId();
+        requireBookableVehicle(request.vehicleId());
         lockConflictingReservations(request.vehicleId(), request.startTime(), request.endTime(), id);
         ensureNoConflict(request.vehicleId(), request.startTime(), request.endTime(), id);
         reservation.setVehicleId(request.vehicleId());
         reservation.setStartTime(request.startTime());
         reservation.setEndTime(request.endTime());
         reservation.setPurpose(request.purpose());
-        reservation.setUpdatedTime(LocalDateTime.now());
         reservationMapper.updateById(reservation);
 
-        Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
-        SysUser user = userMapper.selectById(reservation.getUserId());
-        return ReservationResponse.from(reservation, vehicle, user, null);
+        vehicleService.syncOccupationStatus(request.vehicleId());
+        if (!oldVehicleId.equals(request.vehicleId())) {
+            vehicleService.syncOccupationStatus(oldVehicleId);
+        }
+
+        return toResponse(reservation);
     }
 
     @Transactional
@@ -252,8 +230,8 @@ public class ReservationService {
         }
 
         reservation.setStatus(ReservationStatus.CANCELLED);
-        reservation.setUpdatedTime(LocalDateTime.now());
         reservationMapper.updateById(reservation);
+        vehicleService.syncOccupationStatus(reservation.getVehicleId());
     }
 
     @Transactional
@@ -270,18 +248,13 @@ public class ReservationService {
         reservation.setAuditTime(LocalDateTime.now());
         reservation.setAuditRemark(request.remark());
         reservation.setStatus(request.approved() ? ReservationStatus.APPROVED : ReservationStatus.REJECTED);
-        reservation.setUpdatedTime(LocalDateTime.now());
         reservationMapper.updateById(reservation);
 
-        Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
-        if (request.approved() && vehicle != null && vehicle.getStatus() != VehicleStatus.IN_USE) {
-            vehicle.setStatus(VehicleStatus.IN_USE);
-            vehicle.setUpdatedTime(LocalDateTime.now());
-            vehicleMapper.updateById(vehicle);
-        }
+        vehicleService.syncOccupationStatus(reservation.getVehicleId());
 
-        SysUser user = userMapper.selectById(reservation.getUserId());
-        SysUser auditUser = userMapper.selectById(auditorId);
+        Vehicle vehicle = vehicleService.requireVehicle(reservation.getVehicleId());
+        SysUser user = userService.requireUser(reservation.getUserId());
+        SysUser auditUser = userService.requireUser(auditorId);
 
         notifyApplicant(auditorId, reservation, vehicle, request);
 
@@ -309,26 +282,16 @@ public class ReservationService {
         reservation.setParkingFee(request.parkingFee() != null ? request.parkingFee() : java.math.BigDecimal.ZERO);
         reservation.setFuelFee(request.fuelFee() != null ? request.fuelFee() : java.math.BigDecimal.ZERO);
         reservation.setOtherFee(request.otherFee() != null ? request.otherFee() : java.math.BigDecimal.ZERO);
-        reservation.setUpdatedTime(LocalDateTime.now());
         reservationMapper.updateById(reservation);
 
-        Vehicle vehicle = vehicleMapper.selectById(reservation.getVehicleId());
-        if (vehicle != null) {
-            vehicle.setStatus(VehicleStatus.IDLE);
-            vehicle.setUpdatedTime(LocalDateTime.now());
-            vehicleMapper.updateById(vehicle);
-        }
+        vehicleService.syncOccupationStatus(reservation.getVehicleId());
 
-        SysUser user = userMapper.selectById(reservation.getUserId());
-        return ReservationResponse.from(reservation, vehicle, user, null);
+        return toResponse(reservation);
     }
 
-    private Vehicle findAvailableVehicle(Long vehicleId) {
-        Vehicle vehicle = vehicleMapper.selectById(vehicleId);
-        if (vehicle == null || vehicle.getDeleted() != NOT_DELETED) {
-            throw new BusinessException(ErrorCode.VEHICLE_NOT_FOUND);
-        }
-        if (vehicle.getStatus() == VehicleStatus.DISABLED || vehicle.getStatus() == VehicleStatus.MAINTENANCE) {
+    private Vehicle requireBookableVehicle(Long vehicleId) {
+        Vehicle vehicle = vehicleService.requireVehicle(vehicleId);
+        if (vehicle.getStatus() == VehicleStatus.MAINTENANCE) {
             throw new BusinessException(ErrorCode.VEHICLE_NOT_AVAILABLE);
         }
         return vehicle;
@@ -336,7 +299,7 @@ public class ReservationService {
 
     private VehicleReservation findReservation(Long id) {
         VehicleReservation reservation = reservationMapper.selectById(id);
-        if (reservation == null || reservation.getDeleted() != NOT_DELETED) {
+        if (reservation == null) {
             throw new BusinessException(ErrorCode.RESERVATION_NOT_FOUND);
         }
         return reservation;
@@ -344,31 +307,58 @@ public class ReservationService {
 
     private void lockConflictingReservations(Long vehicleId, LocalDateTime startTime,
                                               LocalDateTime endTime, Long excludedId) {
-        LambdaQueryWrapper<VehicleReservation> wrapper = new LambdaQueryWrapper<VehicleReservation>()
+        reservationMapper.selectList(activeConflictWrapper(vehicleId, startTime, endTime, excludedId)
                 .select(VehicleReservation::getId)
+                .last("FOR UPDATE"));
+    }
+
+    private void ensureNoConflict(Long vehicleId, LocalDateTime startTime, LocalDateTime endTime, Long excludedId) {
+        // 仅申请中/已通过占用档期；已还车/取消/拒绝不参与冲突
+        if (reservationMapper.selectCount(activeConflictWrapper(vehicleId, startTime, endTime, excludedId)) > 0) {
+            throw new BusinessException(ErrorCode.VEHICLE_RESERVATION_CONFLICT);
+        }
+    }
+
+    private LambdaQueryWrapper<VehicleReservation> activeConflictWrapper(
+            Long vehicleId, LocalDateTime startTime, LocalDateTime endTime, Long excludedId) {
+        LambdaQueryWrapper<VehicleReservation> wrapper = new LambdaQueryWrapper<VehicleReservation>()
                 .eq(VehicleReservation::getVehicleId, vehicleId)
-                .eq(VehicleReservation::getDeleted, NOT_DELETED)
-                .notIn(VehicleReservation::getStatus, ReservationStatus.CANCELLED, ReservationStatus.REJECTED)
+                .in(VehicleReservation::getStatus, ReservationStatus.APPLYING, ReservationStatus.APPROVED)
                 .lt(VehicleReservation::getStartTime, endTime)
                 .gt(VehicleReservation::getEndTime, startTime);
         if (excludedId != null) {
             wrapper.ne(VehicleReservation::getId, excludedId);
         }
-        reservationMapper.selectList(wrapper.last("FOR UPDATE"));
+        return wrapper;
     }
 
-    private void ensureNoConflict(Long vehicleId, LocalDateTime startTime, LocalDateTime endTime, Long excludedId) {
-        LambdaQueryWrapper<VehicleReservation> conflict = new LambdaQueryWrapper<VehicleReservation>()
-                .eq(VehicleReservation::getVehicleId, vehicleId)
-                .eq(VehicleReservation::getDeleted, NOT_DELETED)
-                .notIn(VehicleReservation::getStatus, ReservationStatus.CANCELLED, ReservationStatus.REJECTED)
-                .lt(VehicleReservation::getStartTime, endTime)
-                .gt(VehicleReservation::getEndTime, startTime);
-        if (excludedId != null) {
-            conflict.ne(VehicleReservation::getId, excludedId);
-        }
-        if (reservationMapper.selectCount(conflict) > 0) {
-            throw new BusinessException(ErrorCode.VEHICLE_RESERVATION_CONFLICT);
-        }
+    private List<ReservationResponse> toResponses(List<VehicleReservation> records) {
+        Set<Long> vehicleIds = records.stream()
+                .map(VehicleReservation::getVehicleId).collect(Collectors.toSet());
+        Set<Long> userIds = records.stream()
+                .map(VehicleReservation::getUserId).collect(Collectors.toSet());
+        records.forEach(r -> {
+            if (r.getAuditUserId() != null) {
+                userIds.add(r.getAuditUserId());
+            }
+        });
+
+        Map<Long, Vehicle> vehicleMap = vehicleService.mapByIds(vehicleIds);
+        Map<Long, SysUser> userMap = userService.mapByIds(userIds);
+
+        return records.stream()
+                .map(r -> ReservationResponse.from(r,
+                        vehicleMap.get(r.getVehicleId()),
+                        userMap.get(r.getUserId()),
+                        userMap.get(r.getAuditUserId())))
+                .toList();
+    }
+
+    private ReservationResponse toResponse(VehicleReservation reservation) {
+        Vehicle vehicle = vehicleService.requireVehicle(reservation.getVehicleId());
+        SysUser user = userService.requireUser(reservation.getUserId());
+        SysUser auditUser = reservation.getAuditUserId() != null
+                ? userService.requireUser(reservation.getAuditUserId()) : null;
+        return ReservationResponse.from(reservation, vehicle, user, auditUser);
     }
 }

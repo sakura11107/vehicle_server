@@ -2,12 +2,13 @@ package com.vehicle.server.infrastructure.websocket;
 
 import com.vehicle.server.infrastructure.security.JwtUtil;
 import com.vehicle.server.module.system.user.entity.SysUser;
-import com.vehicle.server.module.system.user.mapper.SysUserMapper;
+import com.vehicle.server.module.system.user.service.SysUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageDeliveryException;
 import org.springframework.messaging.simp.config.ChannelRegistration;
 import org.springframework.messaging.simp.config.MessageBrokerRegistry;
 import org.springframework.messaging.simp.stomp.StompCommand;
@@ -28,7 +29,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtUtil jwtUtil;
     private final WebSocketSessionManager sessionManager;
-    private final SysUserMapper userMapper;
+    private final SysUserService userService;
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry registry) {
@@ -67,39 +68,43 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private void handleConnect(StompHeaderAccessor accessor) {
         String token = accessor.getFirstNativeHeader("Authorization");
-        if (token != null && token.startsWith("Bearer ")) {
-            try {
-                String jwt = token.substring(7);
-                if (jwtUtil.isTokenValid(jwt)) {
-                    String username = jwtUtil.extractUsername(jwt);
-                    accessor.setUser(new Principal() {
-                        @Override
-                        public String getName() {
-                            return username;
-                        }
-                    });
-
-                    SysUser user = userMapper.findByUsername(username);
-                    if (user != null) {
-                        sessionManager.userConnected(user.getId(), accessor.getSessionId());
-                    }
-
-                    log.info("WebSocket STOMP 连接认证成功: {}", username);
-                }
-            } catch (Exception e) {
-                log.warn("WebSocket STOMP 认证失败: {}", e.getMessage());
+        if (token == null || !token.startsWith("Bearer ")) {
+            throw new MessageDeliveryException("WebSocket 未提供有效 Authorization");
+        }
+        try {
+            String jwt = token.substring(7);
+            if (!jwtUtil.isTokenValid(jwt)) {
+                throw new MessageDeliveryException("WebSocket Token 无效或已过期");
             }
+            String username = jwtUtil.extractUsername(jwt);
+            SysUser user = userService.findByUsername(username);
+            if (user == null || user.getStatus() == null || user.getStatus() == 0) {
+                throw new MessageDeliveryException("WebSocket 用户不存在或已禁用");
+            }
+
+            accessor.setUser(new Principal() {
+                @Override
+                public String getName() {
+                    return username;
+                }
+            });
+            sessionManager.userConnected(user.getId(), accessor.getSessionId());
+            log.info("WebSocket STOMP 连接认证成功: {}", username);
+        } catch (MessageDeliveryException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("WebSocket STOMP 认证失败: {}", e.getMessage());
+            throw new MessageDeliveryException("WebSocket 认证失败");
         }
     }
 
     private void handleDisconnect(StompHeaderAccessor accessor) {
         Principal principal = accessor.getUser();
         if (principal != null) {
-            String username = principal.getName();
-            SysUser user = userMapper.findByUsername(username);
+            SysUser user = userService.findByUsername(principal.getName());
             if (user != null) {
                 sessionManager.userDisconnected(user.getId());
-                log.info("WebSocket STOMP 断开连接: {}", username);
+                log.info("WebSocket STOMP 断开连接: {}", principal.getName());
             }
         }
     }

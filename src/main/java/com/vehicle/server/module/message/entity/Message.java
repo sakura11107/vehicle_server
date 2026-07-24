@@ -1,8 +1,10 @@
 package com.vehicle.server.module.message.entity;
 
+import com.baomidou.mybatisplus.annotation.FieldFill;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -30,11 +32,13 @@ public class Message {
     @TableField("is_read")
     private Integer isRead = 0;
 
-    private Integer deleted = 0;
+    @TableLogic
+    @TableField(fill = FieldFill.INSERT)
+    private Integer deleted;
 
-    @TableField("created_time")
+    @TableField(value = "created_time", fill = FieldFill.INSERT)
     private LocalDateTime createdTime;
 
-    @TableField("updated_time")
+    @TableField(value = "updated_time", fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updatedTime;
 }

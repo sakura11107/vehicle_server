@@ -1,8 +1,10 @@
 package com.vehicle.server.module.reservation.entity;
 
+import com.baomidou.mybatisplus.annotation.FieldFill;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.vehicle.server.module.reservation.enums.ReservationStatus;
 import lombok.Getter;
@@ -76,11 +78,13 @@ public class VehicleReservation {
     @TableField("other_fee")
     private BigDecimal otherFee = BigDecimal.ZERO;
 
-    private Integer deleted = 0;
+    @TableLogic
+    @TableField(fill = FieldFill.INSERT)
+    private Integer deleted;
 
-    @TableField("created_time")
+    @TableField(value = "created_time", fill = FieldFill.INSERT)
     private LocalDateTime createdTime;
 
-    @TableField("updated_time")
+    @TableField(value = "updated_time", fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updatedTime;
 }

@@ -8,65 +8,93 @@ import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.common.exception.BusinessException;
 import com.vehicle.server.common.exception.ErrorCode;
 import com.vehicle.server.common.id.SnowflakeIdGenerator;
+import com.vehicle.server.infrastructure.mq.RabbitMQConfig;
+import com.vehicle.server.infrastructure.websocket.WebSocketSessionManager;
 import com.vehicle.server.module.message.dto.ConversationResponse;
 import com.vehicle.server.module.message.dto.MessageResponse;
 import com.vehicle.server.module.message.entity.Message;
 import com.vehicle.server.module.message.mapper.MessageMapper;
 import com.vehicle.server.module.system.user.entity.SysUser;
-import com.vehicle.server.module.system.user.mapper.SysUserMapper;
+import com.vehicle.server.module.system.user.service.SysUserService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
-import java.util.*;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class MessageService {
 
-    private static final Integer NOT_DELETED = 0;
     private static final String UNREAD_PREFIX = "unread:";
 
     private final MessageMapper messageMapper;
-    private final SysUserMapper userMapper;
+    private final SysUserService userService;
     private final StringRedisTemplate redisTemplate;
     private final SnowflakeIdGenerator idGenerator;
+    private final RabbitTemplate rabbitTemplate;
+    private final SimpMessagingTemplate messagingTemplate;
+    private final WebSocketSessionManager sessionManager;
 
-    @Transactional
-    public Message send(Long senderId, Long receiverId, String content) {
+    /**
+     * 统一入口：投递到 MQ，由监听器落库并推送。
+     */
+    public void enqueue(Long senderId, Long receiverId, String content) {
         if (senderId.equals(receiverId)) {
             throw new BusinessException(ErrorCode.VALIDATION_FAILED);
         }
-        SysUser receiver = userMapper.selectById(receiverId);
-        if (receiver == null || receiver.getDeleted() != NOT_DELETED) {
-            throw new BusinessException(ErrorCode.USER_NOT_FOUND);
-        }
+        userService.requireUser(receiverId);
+        rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE, RabbitMQConfig.ROUTING_KEY, Map.of(
+                "senderId", senderId.toString(),
+                "receiverId", receiverId.toString(),
+                "content", content
+        ));
+    }
 
-        LocalDateTime now = LocalDateTime.now();
+    /**
+     * 落库 + 未读计数 + WebSocket 推送（仅 MQ 消费者调用）。
+     */
+    @Transactional
+    public MessageResponse persistAndPush(Long senderId, Long receiverId, String content) {
+        if (senderId.equals(receiverId)) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED);
+        }
+        SysUser receiver = userService.requireUser(receiverId);
+        userService.requireUser(senderId);
+
         Message message = new Message();
         message.setId(idGenerator.nextId());
         message.setSenderId(senderId);
         message.setReceiverId(receiverId);
         message.setContent(content);
         message.setIsRead(0);
-        message.setDeleted(NOT_DELETED);
-        message.setCreatedTime(now);
-        message.setUpdatedTime(now);
         messageMapper.insert(message);
 
         redisTemplate.opsForValue().increment(UNREAD_PREFIX + receiverId);
 
-        return message;
+        MessageResponse response = toResponse(message);
+        if (sessionManager.isUserOnline(receiverId)) {
+            messagingTemplate.convertAndSendToUser(
+                    receiver.getUsername(),
+                    "/queue/messages",
+                    response
+            );
+        }
+        return response;
     }
 
     @Transactional(readOnly = true)
     public PageResponse<MessageResponse> getChatHistory(Long currentUserId, Long otherUserId, PageRequest pageRequest) {
         LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
-                .eq(Message::getDeleted, NOT_DELETED)
                 .and(w -> w
                         .eq(Message::getSenderId, currentUserId)
                         .eq(Message::getReceiverId, otherUserId)
@@ -77,19 +105,15 @@ public class MessageService {
 
         IPage<Message> page = messageMapper.selectPage(
                 new Page<>(pageRequest.page(), pageRequest.size()), wrapper);
-        List<Message> pagedMessages = page.getRecords();
-        int total = (int) page.getTotal();
-        int totalPages = (int) page.getPages();
 
-        Set<Long> userIds = Set.of(currentUserId, otherUserId);
-        Map<Long, String> userMap = userMapper.selectBatchIds(userIds).stream()
-                .collect(Collectors.toMap(SysUser::getId, SysUser::getUsername));
+        Map<Long, String> userMap = userService.mapByIds(Set.of(currentUserId, otherUserId)).entrySet().stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().getUsername()));
 
-        List<MessageResponse> records = pagedMessages.stream()
+        List<MessageResponse> records = page.getRecords().stream()
                 .map(m -> MessageResponse.from(m, userMap.get(m.getSenderId()), userMap.get(m.getReceiverId())))
                 .toList();
 
-        return new PageResponse<>(records, total, pageRequest.page(), pageRequest.size(), totalPages);
+        return new PageResponse<>(records, page.getTotal(), pageRequest.page(), pageRequest.size(), (int) page.getPages());
     }
 
     @Transactional(readOnly = true)
@@ -109,11 +133,10 @@ public class MessageService {
                 .map(m -> m.getSenderId().equals(currentUserId) ? m.getReceiverId() : m.getSenderId())
                 .collect(Collectors.toSet());
 
-        Map<Long, String> userMap = userMapper.selectBatchIds(otherUserIds).stream()
-                .collect(Collectors.toMap(SysUser::getId, SysUser::getUsername));
+        Map<Long, String> userMap = userService.mapByIds(otherUserIds).entrySet().stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().getUsername()));
 
         LambdaQueryWrapper<Message> unreadWrapper = new LambdaQueryWrapper<Message>()
-                .eq(Message::getDeleted, NOT_DELETED)
                 .eq(Message::getReceiverId, currentUserId)
                 .eq(Message::getIsRead, 0)
                 .in(Message::getSenderId, otherUserIds);
@@ -142,21 +165,18 @@ public class MessageService {
     @Transactional
     public void markAsRead(Long currentUserId, Long otherUserId) {
         LambdaQueryWrapper<Message> countWrapper = new LambdaQueryWrapper<Message>()
-                .eq(Message::getDeleted, NOT_DELETED)
                 .eq(Message::getSenderId, otherUserId)
                 .eq(Message::getReceiverId, currentUserId)
                 .eq(Message::getIsRead, 0);
         long count = messageMapper.selectCount(countWrapper);
 
         LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
-                .eq(Message::getDeleted, NOT_DELETED)
                 .eq(Message::getSenderId, otherUserId)
                 .eq(Message::getReceiverId, currentUserId)
                 .eq(Message::getIsRead, 0);
 
         Message update = new Message();
         update.setIsRead(1);
-        update.setUpdatedTime(LocalDateTime.now());
         messageMapper.update(update, wrapper);
 
         if (count > 0) {
@@ -169,20 +189,12 @@ public class MessageService {
 
     @Transactional
     public void markAllAsRead(Long currentUserId) {
-        LambdaQueryWrapper<Message> countWrapper = new LambdaQueryWrapper<Message>()
-                .eq(Message::getDeleted, NOT_DELETED)
-                .eq(Message::getReceiverId, currentUserId)
-                .eq(Message::getIsRead, 0);
-        long count = messageMapper.selectCount(countWrapper);
-
         LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
-                .eq(Message::getDeleted, NOT_DELETED)
                 .eq(Message::getReceiverId, currentUserId)
                 .eq(Message::getIsRead, 0);
 
         Message update = new Message();
         update.setIsRead(1);
-        update.setUpdatedTime(LocalDateTime.now());
         messageMapper.update(update, wrapper);
 
         redisTemplate.delete(UNREAD_PREFIX + currentUserId);
@@ -195,7 +207,6 @@ public class MessageService {
             return Long.parseLong(countStr);
         }
         LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
-                .eq(Message::getDeleted, NOT_DELETED)
                 .eq(Message::getReceiverId, currentUserId)
                 .eq(Message::getIsRead, 0);
         long count = messageMapper.selectCount(wrapper);
@@ -206,9 +217,12 @@ public class MessageService {
     }
 
     public MessageResponse toResponse(Message message) {
-        Set<Long> userIds = Set.of(message.getSenderId(), message.getReceiverId());
-        Map<Long, String> userMap = userMapper.selectBatchIds(userIds).stream()
-                .collect(Collectors.toMap(SysUser::getId, SysUser::getUsername));
-        return MessageResponse.from(message, userMap.get(message.getSenderId()), userMap.get(message.getReceiverId()));
+        Map<Long, SysUser> userMap = userService.mapByIds(Set.of(message.getSenderId(), message.getReceiverId()));
+        SysUser sender = userMap.get(message.getSenderId());
+        SysUser receiver = userMap.get(message.getReceiverId());
+        return MessageResponse.from(
+                message,
+                sender != null ? sender.getUsername() : null,
+                receiver != null ? receiver.getUsername() : null);
     }
 }

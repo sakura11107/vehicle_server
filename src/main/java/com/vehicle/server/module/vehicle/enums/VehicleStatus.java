@@ -4,14 +4,13 @@ import com.baomidou.mybatisplus.annotation.EnumValue;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * 车辆状态枚举。
+ * 车辆实时状态。使用中由前端按预约时段判断展示。
  */
 public enum VehicleStatus {
 
-    DISABLED(0, "停用"),
-    IDLE(1, "空闲"),
-    IN_USE(2, "使用中"),
-    MAINTENANCE(3, "维修中");
+    IDLE(1, "空闲中"),
+    RESERVED(2, "已预约"),
+    MAINTENANCE(3, "维保中");
 
     @EnumValue
     @JsonValue

@@ -10,9 +10,11 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @RestController
@@ -40,16 +42,19 @@ public class ReservationController {
     }
 
     @GetMapping("/schedule")
-    @Operation(summary = "查询车辆占用视图", description = "返回申请中/已通过/使用中的预约，供甘特图及预约表单冲突校验使用")
+    @Operation(summary = "查询车辆占用视图", description = "返回时间窗内申请中/已通过的预约。默认近7天至未来30天。")
     public ApiResponse<List<VehicleScheduleItem>> schedule(
-            @RequestParam(required = false) Long vehicleId) {
-        return ApiResponse.success(reservationService.schedule(vehicleId));
+            @RequestParam(required = false) Long vehicleId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime to) {
+        return ApiResponse.success(reservationService.schedule(vehicleId, from, to));
     }
 
     @GetMapping("/{id}")
-    @Operation(summary = "查询预约详情")
+    @Operation(summary = "查询预约详情", description = "申请人本人或车辆管理员及以上可查看")
     public ApiResponse<ReservationResponse> getById(@PathVariable Long id) {
-        return ApiResponse.success(reservationService.getById(id));
+        Long currentUserId = SecurityUtils.getCurrentUserId();
+        return ApiResponse.success(reservationService.getById(id, currentUserId));
     }
 
     @PutMapping("/{id}")
@@ -80,7 +85,7 @@ public class ReservationController {
     }
 
     @PutMapping("/{id}/return")
-    @Operation(summary = "还车登记", description = "登记还车信息并更新车辆状态。申请人本人或车辆管理员及以上角色可操作")
+    @Operation(summary = "还车登记", description = "登记还车信息并释放车辆占用。申请人本人或车辆管理员及以上角色可操作")
     public ApiResponse<ReservationResponse> returnVehicle(
             @PathVariable Long id,
             @Valid @RequestBody ReturnRequest request) {

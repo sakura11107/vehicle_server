@@ -8,27 +8,32 @@ import com.vehicle.server.common.dto.PageResponse;
 import com.vehicle.server.common.exception.BusinessException;
 import com.vehicle.server.common.exception.ErrorCode;
 import com.vehicle.server.common.id.SnowflakeIdGenerator;
+import com.vehicle.server.infrastructure.security.UserDetailsCache;
 import com.vehicle.server.module.system.user.dto.UserCreateRequest;
 import com.vehicle.server.module.system.user.dto.UserListRequest;
 import com.vehicle.server.module.system.user.dto.UserResponse;
 import com.vehicle.server.module.system.user.dto.UserUpdateRequest;
 import com.vehicle.server.module.system.user.entity.SysUser;
+import com.vehicle.server.module.system.user.enums.UserRole;
 import com.vehicle.server.module.system.user.mapper.SysUserMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class SysUserService {
 
-    private static final Integer NOT_DELETED = 0;
     private final SysUserMapper userMapper;
     private final SnowflakeIdGenerator idGenerator;
     private final PasswordEncoder passwordEncoder;
+    private final UserDetailsCache userDetailsCache;
 
     @Transactional
     public UserResponse create(UserCreateRequest request) {
@@ -36,9 +41,6 @@ public class SysUserService {
         SysUser user = new SysUser();
         user.setId(idGenerator.nextId());
         apply(user, request.username(), request.password(), request.email(), request.role(), request.status());
-        LocalDateTime now = LocalDateTime.now();
-        user.setCreatedTime(now);
-        user.setUpdatedTime(now);
         userMapper.insert(user);
         return UserResponse.from(user);
     }
@@ -46,7 +48,6 @@ public class SysUserService {
     @Transactional(readOnly = true)
     public PageResponse<UserResponse> list(PageRequest pageRequest, UserListRequest query) {
         LambdaQueryWrapper<SysUser> wrapper = new LambdaQueryWrapper<SysUser>()
-                .eq(SysUser::getDeleted, NOT_DELETED)
                 .like(query.username() != null && !query.username().isBlank(),
                         SysUser::getUsername, query.username())
                 .eq(query.status() != null, SysUser::getStatus, query.status())
@@ -60,12 +61,48 @@ public class SysUserService {
 
     @Transactional(readOnly = true)
     public UserResponse getById(Long id) {
-        return UserResponse.from(findActiveUser(id));
+        return UserResponse.from(requireUser(id));
+    }
+
+    @Transactional(readOnly = true)
+    public SysUser requireUser(Long id) {
+        SysUser user = userMapper.selectById(id);
+        if (user == null) {
+            throw new BusinessException(ErrorCode.USER_NOT_FOUND);
+        }
+        return user;
+    }
+
+    @Transactional(readOnly = true)
+    public SysUser findByUsername(String username) {
+        return userMapper.selectOne(new LambdaQueryWrapper<SysUser>()
+                .eq(SysUser::getUsername, username));
+    }
+
+    @Transactional(readOnly = true)
+    public Map<Long, SysUser> mapByIds(Collection<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return Map.of();
+        }
+        return userMapper.selectByIds(ids).stream()
+                .collect(Collectors.toMap(SysUser::getId, u -> u));
+    }
+
+    @Transactional(readOnly = true)
+    public List<SysUser> listActiveManagersAndAdmins(Long excludeUserId) {
+        LambdaQueryWrapper<SysUser> wrapper = new LambdaQueryWrapper<SysUser>()
+                .in(SysUser::getRole, UserRole.MANAGER.getCode(), UserRole.ADMIN.getCode())
+                .eq(SysUser::getStatus, 1);
+        if (excludeUserId != null) {
+            wrapper.ne(SysUser::getId, excludeUserId);
+        }
+        return userMapper.selectList(wrapper);
     }
 
     @Transactional
     public UserResponse update(Long id, UserUpdateRequest request) {
-        SysUser user = findActiveUser(id);
+        SysUser user = requireUser(id);
+        String oldUsername = user.getUsername();
         if (existsByUsername(request.username(), id)) {
             throw new BusinessException(ErrorCode.USERNAME_EXISTS);
         }
@@ -73,27 +110,17 @@ public class SysUserService {
             throw new BusinessException(ErrorCode.EMAIL_EXISTS);
         }
         apply(user, request.username(), request.password(), request.email(), request.role(), request.status());
-        user.setUpdatedTime(LocalDateTime.now());
         userMapper.updateById(user);
+        userDetailsCache.evict(oldUsername);
+        userDetailsCache.evict(user.getUsername());
         return UserResponse.from(user);
     }
 
     @Transactional
     public void delete(Long id) {
-        SysUser user = findActiveUser(id);
-        user.setDeleted(1);
-        user.setUpdatedTime(LocalDateTime.now());
-        userMapper.updateById(user);
-    }
-
-    private SysUser findActiveUser(Long id) {
-        SysUser user = userMapper.selectOne(new LambdaQueryWrapper<SysUser>()
-                .eq(SysUser::getId, id)
-                .eq(SysUser::getDeleted, NOT_DELETED));
-        if (user == null) {
-            throw new BusinessException(ErrorCode.USER_NOT_FOUND);
-        }
-        return user;
+        SysUser user = requireUser(id);
+        userMapper.deleteById(id);
+        userDetailsCache.evict(user.getUsername());
     }
 
     private void ensureUniqueForCreate(String username, String email) {
@@ -107,8 +134,7 @@ public class SysUserService {
 
     private boolean existsByUsername(String username, Long excludedId) {
         LambdaQueryWrapper<SysUser> query = new LambdaQueryWrapper<SysUser>()
-                .eq(SysUser::getUsername, username)
-                .eq(SysUser::getDeleted, NOT_DELETED);
+                .eq(SysUser::getUsername, username);
         if (excludedId != null) {
             query.ne(SysUser::getId, excludedId);
         }
@@ -117,8 +143,7 @@ public class SysUserService {
 
     private boolean existsByEmail(String email, Long excludedId) {
         LambdaQueryWrapper<SysUser> query = new LambdaQueryWrapper<SysUser>()
-                .eq(SysUser::getEmail, email)
-                .eq(SysUser::getDeleted, NOT_DELETED);
+                .eq(SysUser::getEmail, email);
         if (excludedId != null) {
             query.ne(SysUser::getId, excludedId);
         }
@@ -134,5 +159,4 @@ public class SysUserService {
             user.setPassword(passwordEncoder.encode(password));
         }
     }
-
 }
