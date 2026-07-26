@@ -35,3 +35,6 @@ build/
 
 # 本地数据库配置：使用 application.yaml.example 作为模板。
 /src/main/resources/application.yaml
+
+# Docker 环境变量（包含敏感信息）
+.env
