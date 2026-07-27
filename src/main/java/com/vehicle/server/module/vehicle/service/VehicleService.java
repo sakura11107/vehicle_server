@@ -151,7 +151,7 @@ public class VehicleService {
     public int importFromExcel(MultipartFile file) {
         List<VehicleExcelDTO> dataList;
         try {
-            dataList = EasyExcel.read(file.getInputStream(), VehicleExcelDTO.class)
+            dataList = EasyExcel.read(file.getInputStream(), VehicleExcelDTO.class, null)
                     .sheet().doReadSync();
         } catch (IOException e) {
             throw new BusinessException(ErrorCode.IMPORT_FORMAT_ERROR);
