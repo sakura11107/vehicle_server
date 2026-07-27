@@ -21,6 +21,7 @@ pipeline {
         
         stage('Deploy') {
             steps {
+                sh 'cp /var/jenkins_home/vehicle_server.env /var/jenkins_home/workspace/vehicle_server/.env'
                 sh 'docker compose up -d'
             }
         }
