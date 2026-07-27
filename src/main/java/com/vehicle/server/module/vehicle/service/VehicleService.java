@@ -1,8 +1,7 @@
 package com.vehicle.server.module.vehicle.service;
 
 import com.alibaba.excel.EasyExcel;
-import com.alibaba.excel.context.AnalysisContext;
-import com.alibaba.excel.read.listener.ReadListener;
+
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
@@ -150,18 +149,10 @@ public class VehicleService {
 
     @Transactional
     public int importFromExcel(MultipartFile file) {
-        List<VehicleExcelDTO> dataList = new ArrayList<>();
+        List<VehicleExcelDTO> dataList;
         try {
-            dataList = EasyExcel.read(file.getInputStream(), VehicleExcelDTO.class, new ReadListener<VehicleExcelDTO>() {
-                @Override
-                public void invoke(VehicleExcelDTO data, AnalysisContext context) {
-                    dataList.add(data);
-                }
-
-                @Override
-                public void doAfterAllAnalysed(AnalysisContext context) {
-                }
-            }).sheet().doReadSync();
+            dataList = EasyExcel.read(file.getInputStream(), VehicleExcelDTO.class)
+                    .sheet().doReadSync();
         } catch (IOException e) {
             throw new BusinessException(ErrorCode.IMPORT_FORMAT_ERROR);
         }

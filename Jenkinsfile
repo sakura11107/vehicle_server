@@ -3,6 +3,7 @@ pipeline {
     
     environment {
         PATH = "/root/.nvm/versions/node/v22.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        DOCKER_BUILDKIT = "1"
     }
     
     stages {
@@ -14,7 +15,7 @@ pipeline {
         
         stage('Build') {
             steps {
-                sh 'docker compose build --no-cache'
+                sh 'docker compose build'
             }
         }
         
