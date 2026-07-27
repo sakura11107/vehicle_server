@@ -1,5 +1,8 @@
 package com.vehicle.server.module.vehicle.service;
 
+import com.alibaba.excel.EasyExcel;
+import com.alibaba.excel.context.AnalysisContext;
+import com.alibaba.excel.read.listener.ReadListener;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
@@ -10,18 +13,31 @@ import com.vehicle.server.common.exception.ErrorCode;
 import com.vehicle.server.common.id.SnowflakeIdGenerator;
 import com.vehicle.server.module.reservation.service.ReservationService;
 import com.vehicle.server.module.vehicle.dto.VehicleCreateRequest;
+import com.vehicle.server.module.vehicle.dto.VehicleExcelDTO;
 import com.vehicle.server.module.vehicle.dto.VehicleListRequest;
 import com.vehicle.server.module.vehicle.dto.VehicleResponse;
 import com.vehicle.server.module.vehicle.dto.VehicleUpdateRequest;
 import com.vehicle.server.module.vehicle.entity.Vehicle;
 import com.vehicle.server.module.vehicle.enums.VehicleStatus;
 import com.vehicle.server.module.vehicle.mapper.VehicleMapper;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
@@ -130,6 +146,134 @@ public class VehicleService {
             throw new BusinessException(ErrorCode.VEHICLE_HAS_ACTIVE_RESERVATIONS);
         }
         vehicleMapper.deleteById(id);
+    }
+
+    @Transactional
+    public int importFromExcel(MultipartFile file) {
+        List<VehicleExcelDTO> dataList = new ArrayList<>();
+        try {
+            dataList = EasyExcel.read(file.getInputStream(), VehicleExcelDTO.class, new ReadListener<VehicleExcelDTO>() {
+                @Override
+                public void invoke(VehicleExcelDTO data, AnalysisContext context) {
+                    dataList.add(data);
+                }
+
+                @Override
+                public void doAfterAllAnalysed(AnalysisContext context) {
+                }
+            }).sheet().doReadSync();
+        } catch (IOException e) {
+            throw new BusinessException(ErrorCode.IMPORT_FORMAT_ERROR);
+        }
+
+        if (dataList.isEmpty()) {
+            throw new BusinessException(ErrorCode.IMPORT_FORMAT_ERROR);
+        }
+
+        Set<String> plateNumbers = new HashSet<>();
+        List<Vehicle> vehicles = new ArrayList<>();
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+        for (int i = 0; i < dataList.size(); i++) {
+            VehicleExcelDTO dto = dataList.get(i);
+            int rowNum = i + 2;
+
+            if (dto.getPlateNumber() == null || dto.getPlateNumber().isBlank()) {
+                throw new BusinessException(ErrorCode.IMPORT_FORMAT_ERROR);
+            }
+
+            String plateNumber = dto.getPlateNumber().trim();
+            if (!plateNumbers.add(plateNumber)) {
+                throw new BusinessException(ErrorCode.IMPORT_DATA_DUPLICATE);
+            }
+
+            Vehicle vehicle = new Vehicle();
+            vehicle.setId(idGenerator.nextId());
+            vehicle.setPlateNumber(plateNumber);
+            vehicle.setBrand(dto.getBrand());
+            vehicle.setModel(dto.getModel());
+            vehicle.setColor(dto.getColor());
+
+            if (dto.getPurchaseDate() != null && !dto.getPurchaseDate().isBlank()) {
+                try {
+                    vehicle.setPurchaseDate(LocalDate.parse(dto.getPurchaseDate().trim(), formatter));
+                } catch (DateTimeParseException e) {
+                    throw new BusinessException(ErrorCode.IMPORT_FORMAT_ERROR);
+                }
+            }
+
+            if (dto.getRentStartDate() != null && !dto.getRentStartDate().isBlank()) {
+                try {
+                    vehicle.setRentStartDate(LocalDate.parse(dto.getRentStartDate().trim(), formatter));
+                } catch (DateTimeParseException e) {
+                    throw new BusinessException(ErrorCode.IMPORT_FORMAT_ERROR);
+                }
+            }
+
+            if (dto.getRentEndDate() != null && !dto.getRentEndDate().isBlank()) {
+                try {
+                    vehicle.setRentEndDate(LocalDate.parse(dto.getRentEndDate().trim(), formatter));
+                } catch (DateTimeParseException e) {
+                    throw new BusinessException(ErrorCode.IMPORT_FORMAT_ERROR);
+                }
+            }
+
+            if (dto.getStatus() != null && !dto.getStatus().isBlank()) {
+                vehicle.setStatus(parseStatus(dto.getStatus().trim()));
+            } else {
+                vehicle.setStatus(VehicleStatus.IDLE);
+            }
+
+            vehicle.setRemark(dto.getRemark());
+            vehicles.add(vehicle);
+        }
+
+        for (Vehicle vehicle : vehicles) {
+            ensurePlateNumberUnique(vehicle.getPlateNumber(), null);
+        }
+
+        for (Vehicle vehicle : vehicles) {
+            vehicleMapper.insert(vehicle);
+        }
+
+        return vehicles.size();
+    }
+
+    private VehicleStatus parseStatus(String statusText) {
+        return switch (statusText) {
+            case "空闲中", "Idle", "idle", "IDLE" -> VehicleStatus.IDLE;
+            case "已预约", "Reserved", "reserved", "RESERVED" -> VehicleStatus.RESERVED;
+            case "维保中", "Maintenance", "maintenance", "MAINTENANCE" -> VehicleStatus.MAINTENANCE;
+            default -> throw new BusinessException(ErrorCode.IMPORT_FORMAT_ERROR);
+        };
+    }
+
+    public void downloadTemplate(HttpServletResponse response) {
+        try {
+            response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            response.setCharacterEncoding("utf-8");
+            String fileName = URLEncoder.encode("车辆导入模板", StandardCharsets.UTF_8).replaceAll("\\+", "%20");
+            response.setHeader("Content-disposition", "attachment;filename=" + fileName + ".xlsx");
+
+            List<VehicleExcelDTO> templateData = new ArrayList<>();
+            VehicleExcelDTO example = new VehicleExcelDTO();
+            example.setPlateNumber("京A12345");
+            example.setBrand("丰田");
+            example.setModel("卡罗拉");
+            example.setColor("白色");
+            example.setPurchaseDate("2024-01-01");
+            example.setRentStartDate("2024-06-01");
+            example.setRentEndDate("2025-06-01");
+            example.setStatus("空闲中");
+            example.setRemark("示例数据");
+            templateData.add(example);
+
+            EasyExcel.write(response.getOutputStream(), VehicleExcelDTO.class)
+                    .sheet("车辆数据")
+                    .doWrite(templateData);
+        } catch (IOException e) {
+            throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+        }
     }
 
     private void ensurePlateNumberUnique(String plateNumber, Long excludedId) {

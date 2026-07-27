@@ -10,11 +10,13 @@ import com.vehicle.server.module.vehicle.dto.VehicleUpdateRequest;
 import com.vehicle.server.module.vehicle.service.VehicleService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 /**
  * 车辆基础信息的 HTTP 接口。
@@ -61,5 +63,18 @@ public class VehicleController {
     public ApiResponse<Void> delete(@PathVariable Long id) {
         vehicleService.delete(id);
         return ApiResponse.success(null);
+    }
+
+    @PostMapping("/import")
+    @PreAuthorize("hasRole('MANAGER')")
+    @Operation(summary = "批量导入车辆", description = "通过Excel文件批量导入车辆数据，需车辆管理员及以上角色")
+    public ApiResponse<Integer> importVehicles(@RequestParam("file") MultipartFile file) {
+        return ApiResponse.success(vehicleService.importFromExcel(file));
+    }
+
+    @GetMapping("/import/template")
+    @Operation(summary = "下载导入模板", description = "下载车辆导入Excel模板")
+    public void downloadTemplate(HttpServletResponse response) {
+        vehicleService.downloadTemplate(response);
     }
 }
