@@ -3,6 +3,7 @@ name: Deploy Backend
 on:
   push:
     branches: [feature-java21]
+  workflow_dispatch:
 
 jobs:
   deploy:
